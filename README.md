@@ -82,8 +82,16 @@ The bridge only accepts updates from the linked chat.
 The agent is held inside that call, so your click reaches it in milliseconds, with no polling
 and no "tell me when you are done". The state directory is watched, so the wake-up is immediate.
 
+There is no deadline by default. You may answer hours later. Claude Code moves a long call to
+the background after about two minutes and delivers the answer as a notification, so the agent
+pays nothing for waiting.
+
 Pass `wait: false` for an item that does not block the agent, then `objective_wait` later if
 the answer turns out to matter.
+
+If you answer in chat instead of on the board, the agent closes the item for you. The
+`scripts/open-objectives-hook.mjs` hook lists the open items on every message, so the agent
+always knows what is still waiting. Register it as a `UserPromptSubmit` hook.
 
 Run the tests with `make test`.
 

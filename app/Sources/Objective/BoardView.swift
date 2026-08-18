@@ -125,23 +125,8 @@ private struct ItemRow: View {
             .onTapGesture(perform: onToggle)
 
             if item.isOpen, let choices = item.choices, !choices.isEmpty {
-                HStack(spacing: 6) {
-                    ForEach(choices, id: \.self) { choice in
-                        Button {
-                            onAnswer(choice)
-                        } label: {
-                            Text(choice)
-                                .font(.system(size: 11, weight: .semibold))
-                                .lineLimit(1)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(accent.opacity(0.18), in: Capsule())
-                                .overlay(Capsule().strokeBorder(accent.opacity(0.4), lineWidth: 1))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.leading, 25)
+                choiceButtons(choices)
+                    .padding(.leading, 25)
             }
 
             if item.isOpen, item.allowReply ?? false {
@@ -179,6 +164,33 @@ private struct ItemRow: View {
         .geometryGroup()
     }
 
+    // Buttons only sit side by side while every label stays fully readable.
+    // Otherwise they stack, because a truncated option cannot be chosen.
+    @ViewBuilder
+    private func choiceButtons(_ choices: [String]) -> some View {
+        let longest = choices.map(\.count).max() ?? 0
+        let fitsInARow = choices.count <= 2 && longest <= 14
+
+        if fitsInARow {
+            HStack(spacing: 6) {
+                ForEach(choices, id: \.self) { choice in
+                    ChoiceButton(title: choice, accent: accent, wide: false) {
+                        onAnswer(choice)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(choices, id: \.self) { choice in
+                    ChoiceButton(title: choice, accent: accent, wide: true) {
+                        onAnswer(choice)
+                    }
+                }
+            }
+        }
+    }
+
     private var statusSymbol: String {
         if !item.isOpen { return "checkmark.circle.fill" }
         return item.isUrgent ? "exclamationmark.circle.fill" : "circle"
@@ -199,6 +211,39 @@ private struct ItemRow: View {
         if isNew { return accent.opacity(0.6) }
         if item.isOpen, item.isUrgent { return Color.red.opacity(0.35) }
         return .clear
+    }
+}
+
+private struct ChoiceButton: View {
+    let title: String
+    let accent: Color
+    let wide: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: wide ? .infinity : nil, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(accent.opacity(hovering ? 0.34 : 0.18), in: shape)
+                .overlay(shape.strokeBorder(accent.opacity(hovering ? 0.75 : 0.4), lineWidth: 1))
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    // A radius wider than half the height draws a capsule, so one shape covers
+    // both the inline pill and the stacked full-width button.
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: wide ? 9 : 999, style: .continuous)
     }
 }
 

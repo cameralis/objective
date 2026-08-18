@@ -67,7 +67,9 @@ function textResult(value) {
 // The state directory is watched, so a click comes back in milliseconds; the
 // one-second poll is only a safety net for missed file events.
 async function waitForItem(id, timeoutSeconds) {
-  const deadline = Date.now() + timeoutSeconds * 1000;
+  // 0 means wait for as long as the session lives.
+  const deadline =
+    timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
   let wake = null;
   let watcher = null;
   try {
@@ -120,10 +122,12 @@ server.registerTool(
       "if linked, Telegram). Use this when you need their input, decision, or " +
       "an action only they can do. Give `choices` for a quick decision, or " +
       "`allow_reply` for a free-text answer. " +
-      "THIS CALL BLOCKS until the user answers and returns their answer, so " +
-      "you get it the moment they click. Do not poll and do not ask the user " +
-      "to tell you when they are done. Pass `wait: false` only for a note the " +
-      "user can handle later, when nothing you do next depends on it.",
+      "THIS CALL BLOCKS with no deadline and returns the user's answer, so " +
+      "you get it the moment they click, even hours later. The client moves " +
+      "the call to the background after about two minutes and tells you when " +
+      "it finishes, so waiting costs you nothing. Do not poll and do not ask " +
+      "the user to tell you when they are done. Pass `wait: false` only for a " +
+      "note the user can handle later, when nothing you do next depends on it.",
     inputSchema: {
       text: z.string().describe("Short objective text shown on the board"),
       detail: z
@@ -164,10 +168,14 @@ server.registerTool(
       timeout_seconds: z
         .number()
         .int()
-        .min(5)
-        .max(3600)
+        .min(0)
+        .max(604800)
         .optional()
-        .describe("How long to block, in seconds (default 1800)"),
+        .describe(
+          "How long to block, in seconds. 0 waits with no deadline. " +
+            "Default 0: the user may answer hours later, and the answer still " +
+            "reaches you."
+        ),
     },
   },
   async ({
@@ -198,7 +206,7 @@ server.registerTool(
       return textResult({ ok: true, item: itemSummary(item) });
     }
 
-    const outcome = await waitForItem(item.id, timeout_seconds ?? 1800);
+    const outcome = await waitForItem(item.id, timeout_seconds ?? 0);
     return textResult({ ok: true, id: item.id, ...outcome });
   }
 );
@@ -229,16 +237,31 @@ server.registerTool(
   "objective_complete",
   {
     title: "Complete objective",
-    description: "Mark an item done. Use when the request is resolved.",
-    inputSchema: { id: z.string().describe("Item id") },
+    description:
+      "Mark an item done. Use it when the request is resolved, and ALWAYS " +
+      "when the user answers you in chat instead of on the board: pass their " +
+      "answer so the board matches what they said. Never leave an item open " +
+      "that the user already answered.",
+    inputSchema: {
+      id: z.string().describe("Item id"),
+      answer: z
+        .string()
+        .optional()
+        .describe("What the user answered, if they answered in chat"),
+    },
   },
-  async ({ id }) => {
+  async ({ id, answer }) => {
     let found = false;
     mutate((s) => {
       const item = s.items.find((i) => i.id === id);
       if (item && item.status === "open") {
+        const now = Date.now() / 1000;
+        if (answer != null) {
+          item.answer = answer;
+          item.answeredAt = now;
+        }
         item.status = "done";
-        item.doneAt = Date.now() / 1000;
+        item.doneAt = now;
         found = true;
       }
     });
@@ -296,14 +319,14 @@ server.registerTool(
       timeout_seconds: z
         .number()
         .int()
-        .min(5)
-        .max(3600)
+        .min(0)
+        .max(604800)
         .optional()
-        .describe("Give up after this many seconds (default 1800)"),
+        .describe("Give up after this many seconds. 0 (default) never gives up."),
     },
   },
   async ({ id, timeout_seconds }) =>
-    textResult(await waitForItem(id, timeout_seconds ?? 1800))
+    textResult(await waitForItem(id, timeout_seconds ?? 0))
 );
 
 await server.connect(new StdioServerTransport());
