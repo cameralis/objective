@@ -8,6 +8,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import * as relay from "./relay.js";
+import { captureOrigin, markWaiting, clearWaiting } from "./origin.js";
 
 const STATE_DIR =
   process.env.OBJECTIVE_STATE_DIR ||
@@ -193,9 +194,14 @@ server.registerTool(
     title: "Add objective",
     description:
       "Ask the user something on their Objective board (a macOS overlay and, " +
-      "if linked, Telegram). Use this when you need their input, decision, or " +
-      "an action only they can do. Give `choices` for a quick decision, or " +
-      "`allow_reply` for a free-text answer. " +
+      "if linked, Telegram). Use it ONLY when you are blocked, and only for " +
+      "the two kinds of ask that fit in one line: a PERMISSION you lack " +
+      "(publish, send, delete, spend), or a FACT only the user holds (which " +
+      "name, is it paid). A judgement call about design, architecture, or " +
+      "tradeoffs does NOT belong here: ask that in the conversation, where you " +
+      "can explain. Never post status or 'review my work' notices. " +
+      "Give `choices` for the options, and add `allow_reply` so the user can " +
+      "answer something you did not list. " +
       "THIS CALL BLOCKS with no deadline and returns the user's answer, so " +
       "you get it the moment they click, even hours later. The client moves " +
       "the call to the background after about two minutes and tells you when " +
@@ -262,6 +268,7 @@ server.registerTool(
     wait,
     timeout_seconds,
   }) => {
+    const origin = captureOrigin();
     const item = {
       id: randomUUID(),
       text,
@@ -271,7 +278,8 @@ server.registerTool(
       choices,
       allowReply: allow_reply ?? false,
       urgent: urgent ?? false,
-      source: source ?? path.basename(process.cwd()),
+      source: source ?? origin.project,
+      origin,
     };
     mutate((s) => s.items.push(item));
     ensureAppRunning();
@@ -290,8 +298,27 @@ server.registerTool(
       return textResult({ ok: true, item: itemSummary(item), delivery });
     }
 
-    const outcome = await waitForAnswer(item.id, timeout_seconds ?? 0);
-    return textResult({ ok: true, id: item.id, delivery, ...outcome });
+    // While the agent is blocked, the board shows it as blocked and the
+    // agent's own terminal tab carries the marker.
+    mutate((s) => {
+      const stored = s.items.find((i) => i.id === item.id);
+      if (stored) {
+        stored.waiting = true;
+        stored.waitingSince = Date.now() / 1000;
+      }
+    });
+    markWaiting(origin);
+
+    try {
+      const outcome = await waitForAnswer(item.id, timeout_seconds ?? 0);
+      return textResult({ ok: true, id: item.id, delivery, ...outcome });
+    } finally {
+      mutate((s) => {
+        const stored = s.items.find((i) => i.id === item.id);
+        if (stored) stored.waiting = false;
+      });
+      clearWaiting(origin);
+    }
   }
 );
 

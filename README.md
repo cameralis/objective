@@ -1,7 +1,16 @@
 # Objective
 
-A small objective board for Claude. When Claude needs your decision, your input, or an
-action only you can do, it adds an item. You answer, and the answer flows back to Claude.
+A queue for blocked agents. When many agents work at once, this is the one place that
+shows which of them is stalled and waiting for you. Click an item and the terminal window
+of the agent that asked comes to the front.
+
+It is deliberately not a chat client. Only two kinds of ask belong on the board:
+
+- a **permission** the agent lacks: publish, send, delete, spend;
+- a **fact** only you hold: which name, is it paid.
+
+Both fit in one line, so buttons answer them well. A judgement call about design or
+tradeoffs stays in the session, where the agent can explain and you can read the code.
 
 Two front ends read the same board:
 
@@ -35,9 +44,23 @@ claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
 ## The overlay
 
 - Claude calls `objective_add`. The item slides in with a glow, a sound plays, and a notification shows.
-- Click an item to check it off. It lingers a few seconds, then fades out.
+- **Click the row to jump to the agent that asked.** The right terminal window comes forward,
+  and the right tab is selected, even with several agents in the same repo.
+- **Click the circle to check the item off.** Answer buttons answer it directly.
+- **`Other…`** opens a text field, for the answer that is not on a button.
+- **Blocked first.** An agent stuck inside its tool call sorts to the top and shows how long
+  it has waited. An item whose session died greys out and says so.
+- The list scrolls once it is long, so a busy queue never covers the screen.
 - Drag the panel anywhere; the position is remembered.
 - Done items are pruned from the state file after one day.
+
+### How the jump works
+
+Each MCP server is one Claude Code session, so it knows the session id, the project, and
+the terminal device of its agent. While the agent waits, the server renames that terminal
+window to a marker only this item uses, which also makes the waiting agent visible in the
+tab bar. The overlay activates the terminal and raises exactly that window or tab through
+accessibility. macOS asks once for permission.
 
 ## The shared bot (recommended)
 

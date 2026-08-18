@@ -1,7 +1,15 @@
 import SwiftUI
 
+private struct ContentHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct BoardView: View {
     @ObservedObject var store: Store
+    @State private var measuredHeight: CGFloat = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -9,12 +17,28 @@ struct BoardView: View {
             if store.visibleItems.isEmpty {
                 emptyRow
             } else {
+                items
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(width: 340, alignment: .leading)
+        .animation(.spring(duration: 0.4), value: store.visibleItems)
+        .glassCard()
+    }
+
+    // The queue may be long when many agents work at once, so it scrolls
+    // instead of growing over the whole screen.
+    private var items: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 6) {
                 ForEach(store.visibleItems) { item in
                     ItemRow(
                         item: item,
                         isNew: store.newIDs.contains(item.id),
                         onToggle: { store.toggle(item.id) },
-                        onAnswer: { store.answer(item.id, with: $0) }
+                        onAnswer: { store.answer(item.id, with: $0) },
+                        onJump: { SessionFocus.focus(item.origin) }
                     )
                     .transition(.asymmetric(
                         insertion: .move(edge: .top).combined(with: .opacity),
@@ -23,12 +47,15 @@ struct BoardView: View {
                     .zIndex(store.newIDs.contains(item.id) ? 2 : (item.isOpen ? 1 : 0))
                 }
             }
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: ContentHeight.self, value: proxy.size.height)
+                }
+            )
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(width: 340, alignment: .leading)
-        .animation(.spring(duration: 0.4), value: store.visibleItems)
-        .glassCard()
+        .frame(height: min(measuredHeight, 460))
+        .scrollDisabled(measuredHeight <= 460)
+        .onPreferenceChange(ContentHeight.self) { measuredHeight = $0 }
     }
 
     private var header: some View {
@@ -79,19 +106,34 @@ private struct ItemRow: View {
     let isNew: Bool
     let onToggle: () -> Void
     let onAnswer: (String) -> Void
+    let onJump: () -> Void
 
     @State private var reply = ""
+    @State private var writingReply = false
     @FocusState private var replyFocused: Bool
 
     private var accent: Color { item.isUrgent ? .red : .accentColor }
+    private var agentGone: Bool { item.isOpen && !SessionFocus.isAgentAlive(item.origin) }
+    private var canJump: Bool { item.isOpen && !agentGone && SessionFocus.canFocus(item.origin) }
+    // A pure permission question needs no text box; a fact question keeps one
+    // for the answer that is not on a button.
+    private var showsReplyField: Bool {
+        guard item.isOpen, item.allowReply ?? false else { return false }
+        return item.choices?.isEmpty != false || writingReply
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: statusSymbol)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(statusStyle)
-                    .contentTransition(.symbolEffect(.replace))
+                Button(action: onToggle) {
+                    Image(systemName: statusSymbol)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(statusStyle)
+                        .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(.plain)
+                .help("Mark done")
+
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(item.text)
@@ -112,6 +154,7 @@ private struct ItemRow: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
+                    if item.isOpen { statusLine }
                     if !item.isOpen, let answer = item.answer, !answer.isEmpty {
                         Label(answer, systemImage: "arrowshape.turn.up.left.fill")
                             .font(.system(size: 11, weight: .medium))
@@ -120,21 +163,28 @@ private struct ItemRow: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
+                if canJump {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
             }
             .contentShape(Rectangle())
-            .onTapGesture(perform: onToggle)
+            // The board routes; it does not try to be the conversation.
+            .onTapGesture { if canJump { onJump() } }
+            .help(canJump ? "Go to the agent that asked" : "")
 
             if item.isOpen, let choices = item.choices, !choices.isEmpty {
                 choiceButtons(choices)
                     .padding(.leading, 25)
             }
 
-            if item.isOpen, item.allowReply ?? false {
+            if showsReplyField {
                 HStack(spacing: 6) {
                     Image(systemName: "arrowshape.turn.up.left")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    TextField("Reply…", text: $reply)
+                    TextField("Your answer…", text: $reply)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12))
                         .focused($replyFocused)
@@ -164,12 +214,39 @@ private struct ItemRow: View {
         .geometryGroup()
     }
 
+    // Says why this item is at the top: an agent is stalled inside its tool
+    // call, or the session that asked has gone away.
+    @ViewBuilder
+    private var statusLine: some View {
+        if agentGone {
+            Label("the agent is gone", systemImage: "moon.zzz")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.tertiary)
+        } else if item.isBlocking {
+            TimelineView(.periodic(from: .now, by: 15)) { _ in
+                Label(
+                    "blocked \(Self.duration(item.blockedFor ?? 0))",
+                    systemImage: "hourglass"
+                )
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(accent)
+            }
+        }
+    }
+
+    private static func duration(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(max(Int(seconds), 1))s" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m" }
+        return "\(Int(seconds / 3600))h \(Int(seconds.truncatingRemainder(dividingBy: 3600) / 60))m"
+    }
+
     // Buttons only sit side by side while every label stays fully readable.
     // Otherwise they stack, because a truncated option cannot be chosen.
     @ViewBuilder
     private func choiceButtons(_ choices: [String]) -> some View {
+        let escapeHatch = (item.allowReply ?? false) && !writingReply
         let longest = choices.map(\.count).max() ?? 0
-        let fitsInARow = choices.count <= 2 && longest <= 14
+        let fitsInARow = choices.count <= 2 && longest <= 14 && !escapeHatch
 
         if fitsInARow {
             HStack(spacing: 6) {
@@ -185,6 +262,12 @@ private struct ItemRow: View {
                 ForEach(choices, id: \.self) { choice in
                     ChoiceButton(title: choice, accent: accent, wide: true) {
                         onAnswer(choice)
+                    }
+                }
+                if escapeHatch {
+                    ChoiceButton(title: "Other…", accent: .secondary, wide: true) {
+                        writingReply = true
+                        replyFocused = true
                     }
                 }
             }

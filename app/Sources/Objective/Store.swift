@@ -26,11 +26,18 @@ final class Store: ObservableObject {
             return false
         }
         .sorted { a, b in
-            // Done items keep their place while they linger; a check-off
-            // must not reorder the list mid-animation.
-            if a.isUrgent != b.isUrgent { return a.isUrgent }
+            // A blocked agent waits for this answer, so it outranks anything
+            // that only sits in the queue. Done items keep their place while
+            // they linger; a check-off must not reorder the list mid-animation.
+            if rank(a) != rank(b) { return rank(a) > rank(b) }
             return a.createdAt < b.createdAt
         }
+    }
+
+    private func rank(_ item: ObjectiveItem) -> Int {
+        guard item.isOpen else { return -1 }
+        if !SessionFocus.isAgentAlive(item.origin) { return 0 }
+        return (item.isUrgent ? 2 : 0) + (item.isBlocking ? 1 : 0)
     }
 
     var openCount: Int { items.filter(\.isOpen).count }
