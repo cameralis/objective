@@ -17,15 +17,14 @@ Two front ends read the same board:
 - a macOS Liquid Glass overlay, always on top, like a game HUD;
 - a Telegram bot, for when you are away from the Mac.
 
-The bot comes in two shapes. Use your own bot with the local bridge, or use one
-shared bot on a Cloudflare Worker, where nobody needs @BotFather.
+One shared bot serves everybody, so no user ever talks to @BotFather. Nothing extra runs
+on your Mac for it.
 
 ## Parts
 
 - `app/` — native SwiftUI app. A borderless, non-activating glass panel that floats above all windows and spaces. A `scope` icon in the menu bar shows or hides it.
 - `mcp/` — MCP server (Node, stdio). Tools: `objective_add`, `objective_list`, `objective_complete`, `objective_remove`, `objective_clear`, `objective_wait`.
-- `telegram/` — local Telegram bridge (Node, no dependencies). Your own bot, polled from this Mac.
-- `relay/` — shared-bot relay for Cloudflare Workers. One bot for every user, paired with a code. See `relay/README.md`.
+- `relay/` — the Telegram side: one shared bot on a Cloudflare Worker, paired with a code. See `relay/README.md`.
 - Shared state: `~/Library/Application Support/Objective/state.json`. Every part watches the file, so updates are immediate and bidirectional. You can run the overlay, the bot, or both.
 
 ## Build and install
@@ -75,34 +74,17 @@ After that the MCP server posts every item to the relay and waits on the overlay
 and on Telegram at the same time. The first answer wins. Deployment steps are in
 `relay/README.md`.
 
-## Your own bot (no server)
+### In the chat
 
-Each open objective is one chat message. There is no always-visible board: the chat is the board.
-
-```sh
-# 1. Talk to @BotFather in Telegram, send /newbot, copy the token.
-make telegram-token TOKEN=<bot token>
-
-# 2. Start the bridge, then send /start to your bot to link the chat.
-make telegram
-
-# 3. Optional: keep it running in the background.
-make telegram-service
-```
-
-- **Choices** become inline buttons. Tap one; the answer goes back to Claude at once.
+- **Choices** become inline buttons. Tap one; the answer goes back to the agent at once.
 - **Reply items** ask for text. Reply to the message and your text is the answer. Plain text with no reply goes to the newest item that asked for text.
 - **Plain items** get a `✓ Done` button.
 - **Urgent** items show 🔴 and an `#urgent` tag. The `source` becomes a hashtag, so you can filter by project.
-- When an item is answered anywhere (bot, overlay, or Claude), the chat message is edited: struck through, with the answer below it.
-- Commands: `/list`, `/help`, `/id`.
+- When an item is answered anywhere, the chat message is edited: struck through, with the answer below it.
+- Commands: `/start` pairs a Mac, `/unlink` revokes every paired Mac, `/help`.
 
-`make telegram-test` runs the bridge end to end against a fake Telegram server, so you can
-check the message flow without a bot.
-
-The bot token is stored in `~/Library/Application Support/Objective/telegram.json`, outside the
-repository. `OBJECTIVE_TELEGRAM_TOKEN` and `OBJECTIVE_TELEGRAM_CHAT_ID` override it.
-The bridge only accepts updates from the linked chat.
+There is no jump from Telegram, because there is no window to raise on your phone. That is
+the one thing the overlay does and the chat cannot.
 
 ## Item options
 
@@ -138,7 +120,6 @@ Run the tests with `make test`.
 ## Launch at login
 
 Add `~/Applications/Objective.app` in System Settings → General → Login Items.
-The Telegram bridge starts itself after `make telegram-service`.
 
 ## Requirements
 

@@ -298,6 +298,8 @@ export class Board {
       text: renderText(item),
       parse_mode: "HTML",
       reply_markup: sendMarkup(item),
+      // Explicit, so nobody has to wonder why a phone stayed quiet.
+      disable_notification: false,
     });
     item.messageId = message.message_id;
 
