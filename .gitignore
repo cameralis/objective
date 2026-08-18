@@ -1,0 +1,17 @@
+# Build output
+build/
+.build/
+*.iconset/
+*.icns
+
+# Dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# Local secrets: the Telegram bot token lives in
+# ~/Library/Application Support/Objective/telegram.json, never in the repo.
+*.local
+telegram/*.json
+!telegram/package.json

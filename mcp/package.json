@@ -1,0 +1,13 @@
+{
+  "name": "objective-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for the Objective overlay app",
+  "type": "module",
+  "bin": {
+    "objective-mcp": "index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  }
+}

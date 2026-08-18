@@ -1,0 +1,12 @@
+{
+  "name": "objective-telegram",
+  "version": "1.0.0",
+  "description": "Telegram bridge for the Objective board",
+  "type": "module",
+  "bin": {
+    "objective-telegram": "bridge.js"
+  },
+  "scripts": {
+    "start": "node bridge.js"
+  }
+}
