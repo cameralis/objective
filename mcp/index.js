@@ -8,12 +8,9 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 
-const STATE_DIR = path.join(
-  os.homedir(),
-  "Library",
-  "Application Support",
-  "Objective"
-);
+const STATE_DIR =
+  process.env.OBJECTIVE_STATE_DIR ||
+  path.join(os.homedir(), "Library", "Application Support", "Objective");
 const STATE_FILE = path.join(STATE_DIR, "state.json");
 const APP_PATH =
   process.env.OBJECTIVE_APP ||
@@ -66,6 +63,52 @@ function textResult(value) {
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
+// Block until the user answers, checks the item off, or removes it.
+// The state directory is watched, so a click comes back in milliseconds; the
+// one-second poll is only a safety net for missed file events.
+async function waitForItem(id, timeoutSeconds) {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  let wake = null;
+  let watcher = null;
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    watcher = fs.watch(STATE_DIR, () => wake?.());
+  } catch {
+    // Fall back to polling only.
+  }
+  try {
+    for (;;) {
+      const item = readState().items.find((i) => i.id === id);
+      if (!item) return { result: "removed" };
+      if (item.status !== "open") {
+        return {
+          result: "done",
+          answer: item.answer ?? null,
+          answered: item.answer != null,
+        };
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) {
+        return {
+          result: "timeout",
+          note: "Item is still open. Call objective_wait with the same id to keep waiting.",
+        };
+      }
+      await new Promise((resolve) => {
+        const timer = setTimeout(finish, Math.min(1000, left));
+        wake = finish;
+        function finish() {
+          clearTimeout(timer);
+          wake = null;
+          resolve();
+        }
+      });
+    }
+  } finally {
+    watcher?.close();
+  }
+}
+
 const server = new McpServer({ name: "objective", version: "1.0.0" });
 
 server.registerTool(
@@ -73,11 +116,14 @@ server.registerTool(
   {
     title: "Add objective",
     description:
-      "Add an item to the user's always-on-top Objective overlay board. " +
-      "Use this when you need the user's input, decision, or action. " +
-      "Give `choices` for a quick decision (the user clicks one), or set " +
-      "`allow_reply` for a free-text answer. Then call objective_wait with " +
-      "the returned id to get the user's answer. Returns the new item's id.",
+      "Ask the user something on their Objective board (a macOS overlay and, " +
+      "if linked, Telegram). Use this when you need their input, decision, or " +
+      "an action only they can do. Give `choices` for a quick decision, or " +
+      "`allow_reply` for a free-text answer. " +
+      "THIS CALL BLOCKS until the user answers and returns their answer, so " +
+      "you get it the moment they click. Do not poll and do not ask the user " +
+      "to tell you when they are done. Pass `wait: false` only for a note the " +
+      "user can handle later, when nothing you do next depends on it.",
     inputSchema: {
       text: z.string().describe("Short objective text shown on the board"),
       detail: z
@@ -109,9 +155,31 @@ server.registerTool(
           "Short label of who is asking, e.g. the project or repo name. " +
             "Defaults to the current directory name."
         ),
+      wait: z
+        .boolean()
+        .optional()
+        .describe(
+          "Block until the user answers and return the answer (default true)"
+        ),
+      timeout_seconds: z
+        .number()
+        .int()
+        .min(5)
+        .max(3600)
+        .optional()
+        .describe("How long to block, in seconds (default 1800)"),
     },
   },
-  async ({ text, detail, choices, allow_reply, urgent, source }) => {
+  async ({
+    text,
+    detail,
+    choices,
+    allow_reply,
+    urgent,
+    source,
+    wait,
+    timeout_seconds,
+  }) => {
     const item = {
       id: randomUUID(),
       text,
@@ -125,7 +193,13 @@ server.registerTool(
     };
     mutate((s) => s.items.push(item));
     ensureAppRunning();
-    return textResult({ ok: true, item: itemSummary(item) });
+
+    if (wait === false) {
+      return textResult({ ok: true, item: itemSummary(item) });
+    }
+
+    const outcome = await waitForItem(item.id, timeout_seconds ?? 1800);
+    return textResult({ ok: true, id: item.id, ...outcome });
   }
 );
 
@@ -213,9 +287,10 @@ server.registerTool(
   {
     title: "Wait for objective",
     description:
-      "Block until the user answers or checks the item off (or it is removed), " +
-      "then return its final status and answer. " +
-      "Polls the board every 2 seconds. Default timeout 240 seconds.",
+      "Block until the user answers an item you added earlier with " +
+      "`wait: false`, or keep waiting after a timeout. Returns the moment the " +
+      "user clicks. objective_add already waits by default, so you rarely " +
+      "need this.",
     inputSchema: {
       id: z.string().describe("Item id to wait for"),
       timeout_seconds: z
@@ -224,20 +299,11 @@ server.registerTool(
         .min(5)
         .max(3600)
         .optional()
-        .describe("Give up after this many seconds (default 240)"),
+        .describe("Give up after this many seconds (default 1800)"),
     },
   },
-  async ({ id, timeout_seconds }) => {
-    const deadline = Date.now() + (timeout_seconds ?? 240) * 1000;
-    while (Date.now() < deadline) {
-      const item = readState().items.find((i) => i.id === id);
-      if (!item) return textResult({ result: "removed" });
-      if (item.status === "done")
-        return textResult({ result: "done", answer: item.answer ?? null });
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-    return textResult({ result: "timeout", note: "Item is still open." });
-  }
+  async ({ id, timeout_seconds }) =>
+    textResult(await waitForItem(id, timeout_seconds ?? 1800))
 );
 
 await server.connect(new StdioServerTransport());

@@ -76,8 +76,16 @@ The bridge only accepts updates from the linked chat.
 | `allow_reply` | Free-text answer field. |
 | `urgent` | Red styling, stronger sound, sorts to the top. |
 | `source` | Project or repo label. |
+| `wait` | Block until you answer (default `true`). |
 
-Claude calls `objective_wait` to block until you answer. It returns your answer.
+`objective_add` blocks by default and returns your answer as the result of the tool call.
+The agent is held inside that call, so your click reaches it in milliseconds, with no polling
+and no "tell me when you are done". The state directory is watched, so the wake-up is immediate.
+
+Pass `wait: false` for an item that does not block the agent, then `objective_wait` later if
+the answer turns out to matter.
+
+Run the tests with `make test`.
 
 ## Launch at login
 

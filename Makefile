@@ -8,7 +8,7 @@ AGENT_DIR = $(HOME)/Library/LaunchAgents
 AGENT = $(AGENT_DIR)/com.objective.telegram.plist
 TG_LOG = $(HOME)/Library/Logs/objective-telegram.log
 
-.PHONY: build bundle install run deps clean icon telegram telegram-token telegram-test telegram-service telegram-unservice
+.PHONY: build bundle install run deps clean icon test mcp-test telegram telegram-token telegram-test telegram-service telegram-unservice
 
 build:
 	swift build -c release --package-path app
@@ -48,6 +48,11 @@ telegram:
 telegram-token:
 	@test -n "$(TOKEN)" || { echo "usage: make telegram-token TOKEN=<bot token>"; exit 1; }
 	node telegram/bridge.js --token "$(TOKEN)" --status
+
+test: mcp-test telegram-test
+
+mcp-test:
+	node mcp/test-mcp.mjs
 
 telegram-test:
 	node telegram/test-bridge.mjs
