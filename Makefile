@@ -3,12 +3,7 @@ BUILD_DIR = build
 BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
 INSTALL_DIR = $(HOME)/Applications
 
-NODE = $(shell command -v node)
-AGENT_DIR = $(HOME)/Library/LaunchAgents
-AGENT = $(AGENT_DIR)/com.objective.telegram.plist
-TG_LOG = $(HOME)/Library/Logs/objective-telegram.log
-
-.PHONY: build bundle install run deps clean icon test mcp-test telegram telegram-token telegram-test telegram-service telegram-unservice relay-test relay-deploy relay-secrets relay-webhook relay-pair
+.PHONY: build bundle install run deps clean icon test mcp-test relay-test relay-deploy relay-secrets relay-webhook relay-pair
 
 build:
 	swift build -c release --package-path app
@@ -42,14 +37,7 @@ run: install
 deps:
 	cd mcp && pnpm install
 
-telegram:
-	node telegram/bridge.js
-
-telegram-token:
-	@test -n "$(TOKEN)" || { echo "usage: make telegram-token TOKEN=<bot token>"; exit 1; }
-	node telegram/bridge.js --token "$(TOKEN)" --status
-
-test: mcp-test telegram-test relay-test
+test: mcp-test relay-test
 
 mcp-test:
 	node mcp/test-mcp.mjs
@@ -81,23 +69,6 @@ relay-webhook:
 relay-pair:
 	@test -n "$(CODE)" || { echo "usage: make relay-pair CODE=XXXXXXXX [URL=<relay url>]"; exit 1; }
 	node mcp/index.js --pair $(CODE) $(if $(URL),--url $(URL),)
-
-telegram-test:
-	node telegram/test-bridge.mjs
-
-telegram-service:
-	mkdir -p $(AGENT_DIR)
-	sed -e 's|__NODE__|$(NODE)|' \
-	    -e 's|__SCRIPT__|$(CURDIR)/telegram/bridge.js|' \
-	    -e 's|__LOG__|$(TG_LOG)|' \
-	    telegram/com.objective.telegram.plist.in > $(AGENT)
-	launchctl unload $(AGENT) 2>/dev/null || true
-	launchctl load $(AGENT)
-	@echo "bridge running in the background; log: $(TG_LOG)"
-
-telegram-unservice:
-	launchctl unload $(AGENT) 2>/dev/null || true
-	rm -f $(AGENT)
 
 clean:
 	rm -rf $(BUILD_DIR) app/.build

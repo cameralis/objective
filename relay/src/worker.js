@@ -13,7 +13,7 @@
 // the object verifies the signature. /unlink raises the epoch, which kills every
 // key that chat ever handed out.
 
-import { renderText, inlineKeyboard, sendMarkup } from "../../telegram/render.js";
+import { renderText, inlineKeyboard, sendMarkup } from "./render.js";
 
 const MAX_WAIT_SECONDS = 25; // one poll stays well inside any edge timeout
 const PAIR_CODE_TTL = 10 * 60 * 1000;

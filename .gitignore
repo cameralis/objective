@@ -10,8 +10,8 @@ node_modules/
 # macOS
 .DS_Store
 
-# Local secrets: the Telegram bot token lives in
-# ~/Library/Application Support/Objective/telegram.json, never in the repo.
+# Local secrets: the bot token and the relay account key live in
+# ~/Library/Application Support/Objective/, never in the repo.
 *.local
-telegram/*.json
-!telegram/package.json
+.dev.vars
+relay/.wrangler/
