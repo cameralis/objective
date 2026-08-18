@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import * as relay from "./relay.js";
 
 const STATE_DIR =
   process.env.OBJECTIVE_STATE_DIR ||
@@ -111,6 +112,79 @@ async function waitForItem(id, timeoutSeconds) {
   }
 }
 
+// `node mcp/index.js --pair CODE [--url https://relay.example.workers.dev]`
+if (process.argv.includes("--pair")) {
+  const code = process.argv[process.argv.indexOf("--pair") + 1];
+  const urlFlag = process.argv.indexOf("--url");
+  const url =
+    (urlFlag >= 0 ? process.argv[urlFlag + 1] : null) ??
+    process.env.OBJECTIVE_RELAY_URL ??
+    relay.relayConfig()?.url;
+  if (!code || !url) {
+    console.error(
+      "Usage: node mcp/index.js --pair <CODE> --url <relay url>\n" +
+        "Send /start to the bot in Telegram to get a code."
+    );
+    process.exit(1);
+  }
+  try {
+    const link = await relay.pair(url, code.trim().toUpperCase());
+    console.log(`Paired with ${link.url}. Telegram now mirrors your board.`);
+    process.exit(0);
+  } catch (err) {
+    console.error(`Pairing failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+function answerLocally(id, answer) {
+  mutate((s) => {
+    const item = s.items.find((i) => i.id === id);
+    if (!item || item.status !== "open") return;
+    const now = Date.now() / 1000;
+    if (answer != null) {
+      item.answer = answer;
+      item.answeredAt = now;
+    }
+    item.status = "done";
+    item.doneAt = now;
+  });
+}
+
+// Waits on the overlay and on the shared bot at the same time. The first
+// answer wins, and the other side is brought up to date.
+async function waitForAnswer(id, timeoutSeconds) {
+  const link = relay.relayConfig();
+  if (!link) return waitForItem(id, timeoutSeconds);
+
+  const controller = new AbortController();
+  const remote = relay
+    .waitForAnswer(link, id, controller.signal)
+    .then((answer) => ({ from: "telegram", answer }));
+  const local = waitForItem(id, timeoutSeconds).then((outcome) => ({
+    from: "board",
+    outcome,
+  }));
+
+  const winner = await Promise.race([remote, local]);
+  controller.abort();
+
+  if (winner.from === "telegram") {
+    answerLocally(id, winner.answer);
+    return {
+      result: "done",
+      answer: winner.answer,
+      answered: winner.answer != null,
+      via: "telegram",
+    };
+  }
+
+  if (winner.outcome.result === "done") {
+    relay.closeItem(link, id, winner.outcome.answer).catch(() => {});
+  }
+  return winner.outcome;
+}
+
 const server = new McpServer({ name: "objective", version: "1.0.0" });
 
 server.registerTool(
@@ -202,12 +276,22 @@ server.registerTool(
     mutate((s) => s.items.push(item));
     ensureAppRunning();
 
-    if (wait === false) {
-      return textResult({ ok: true, item: itemSummary(item) });
+    const link = relay.relayConfig();
+    let delivery = link ? "board and telegram" : "board";
+    if (link) {
+      try {
+        await relay.pushItem(link, item);
+      } catch (err) {
+        delivery = `board only (telegram failed: ${err.message})`;
+      }
     }
 
-    const outcome = await waitForItem(item.id, timeout_seconds ?? 0);
-    return textResult({ ok: true, id: item.id, ...outcome });
+    if (wait === false) {
+      return textResult({ ok: true, item: itemSummary(item), delivery });
+    }
+
+    const outcome = await waitForAnswer(item.id, timeout_seconds ?? 0);
+    return textResult({ ok: true, id: item.id, delivery, ...outcome });
   }
 );
 
@@ -326,7 +410,7 @@ server.registerTool(
     },
   },
   async ({ id, timeout_seconds }) =>
-    textResult(await waitForItem(id, timeout_seconds ?? 0))
+    textResult(await waitForAnswer(id, timeout_seconds ?? 0))
 );
 
 await server.connect(new StdioServerTransport());

@@ -1,0 +1,17 @@
+name = "objective-relay"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+# One object per Telegram chat. SQLite-backed classes run on the free plan.
+[[durable_objects.bindings]]
+name = "BOARD"
+class_name = "Board"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Board"]
+
+# Secrets, set with `wrangler secret put <NAME>`:
+#   BOT_TOKEN       the shared bot token from @BotFather
+#   KEY_SECRET      random string that signs account keys
+#   WEBHOOK_SECRET  random string Telegram sends back on every webhook call

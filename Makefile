@@ -8,7 +8,7 @@ AGENT_DIR = $(HOME)/Library/LaunchAgents
 AGENT = $(AGENT_DIR)/com.objective.telegram.plist
 TG_LOG = $(HOME)/Library/Logs/objective-telegram.log
 
-.PHONY: build bundle install run deps clean icon test mcp-test telegram telegram-token telegram-test telegram-service telegram-unservice
+.PHONY: build bundle install run deps clean icon test mcp-test telegram telegram-token telegram-test telegram-service telegram-unservice relay-test relay-deploy relay-secrets relay-webhook relay-pair
 
 build:
 	swift build -c release --package-path app
@@ -49,10 +49,38 @@ telegram-token:
 	@test -n "$(TOKEN)" || { echo "usage: make telegram-token TOKEN=<bot token>"; exit 1; }
 	node telegram/bridge.js --token "$(TOKEN)" --status
 
-test: mcp-test telegram-test
+test: mcp-test telegram-test relay-test
 
 mcp-test:
 	node mcp/test-mcp.mjs
+
+relay-test:
+	node relay/test-relay.mjs
+	node mcp/test-relay-e2e.mjs
+
+relay-deploy:
+	cd relay && pnpm dlx wrangler deploy
+
+# One-time secrets for the shared bot. Run each and paste the value.
+relay-secrets:
+	cd relay && pnpm dlx wrangler secret put BOT_TOKEN
+	cd relay && pnpm dlx wrangler secret put KEY_SECRET
+	cd relay && pnpm dlx wrangler secret put WEBHOOK_SECRET
+
+# Point Telegram at the deployed relay. TOKEN, URL and SECRET are required.
+relay-webhook:
+	@test -n "$(TOKEN)" && test -n "$(URL)" && test -n "$(SECRET)" || \
+		{ echo "usage: make relay-webhook TOKEN=<bot token> URL=<relay url> SECRET=<webhook secret>"; exit 1; }
+	curl -sS "https://api.telegram.org/bot$(TOKEN)/setWebhook" \
+		-d "url=$(URL)/telegram/webhook" \
+		-d "secret_token=$(SECRET)" \
+		-d "allowed_updates=[\"message\",\"callback_query\"]"
+	@echo
+
+# Link this Mac to the shared bot. Send /start to the bot to get a code.
+relay-pair:
+	@test -n "$(CODE)" || { echo "usage: make relay-pair CODE=XXXXXXXX [URL=<relay url>]"; exit 1; }
+	node mcp/index.js --pair $(CODE) $(if $(URL),--url $(URL),)
 
 telegram-test:
 	node telegram/test-bridge.mjs

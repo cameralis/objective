@@ -8,11 +8,15 @@ Two front ends read the same board:
 - a macOS Liquid Glass overlay, always on top, like a game HUD;
 - a Telegram bot, for when you are away from the Mac.
 
+The bot comes in two shapes. Use your own bot with the local bridge, or use one
+shared bot on a Cloudflare Worker, where nobody needs @BotFather.
+
 ## Parts
 
 - `app/` — native SwiftUI app. A borderless, non-activating glass panel that floats above all windows and spaces. A `scope` icon in the menu bar shows or hides it.
 - `mcp/` — MCP server (Node, stdio). Tools: `objective_add`, `objective_list`, `objective_complete`, `objective_remove`, `objective_clear`, `objective_wait`.
-- `telegram/` — Telegram bridge (Node, no dependencies). Each objective becomes a chat message with buttons.
+- `telegram/` — local Telegram bridge (Node, no dependencies). Your own bot, polled from this Mac.
+- `relay/` — shared-bot relay for Cloudflare Workers. One bot for every user, paired with a code. See `relay/README.md`.
 - Shared state: `~/Library/Application Support/Objective/state.json`. Every part watches the file, so updates are immediate and bidirectional. You can run the overlay, the bot, or both.
 
 ## Build and install
@@ -35,7 +39,20 @@ claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
 - Drag the panel anywhere; the position is remembered.
 - Done items are pruned from the state file after one day.
 
-## The Telegram bot
+## The shared bot (recommended)
+
+One bot serves everybody, so a user never creates a bot. Deploy the Worker once, then:
+
+```sh
+# In Telegram: open the bot, tap Start, copy the eight character code.
+make relay-pair CODE=XXXXXXXX URL=https://objective-relay.<you>.workers.dev
+```
+
+After that the MCP server posts every item to the relay and waits on the overlay
+and on Telegram at the same time. The first answer wins. Deployment steps are in
+`relay/README.md`.
+
+## Your own bot (no server)
 
 Each open objective is one chat message. There is no always-visible board: the chat is the board.
 
