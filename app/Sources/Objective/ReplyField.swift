@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-// The overlay is a non-activating panel, so a click inside it leaves the
-// keyboard with the app you were using. A SwiftUI TextField therefore looks
-// focused and receives nothing. This field takes the keyboard itself: it
-// activates the app, makes the panel key, and becomes first responder.
+// A SwiftUI TextField inside a non-activating panel looks focused and receives
+// nothing, because the panel never becomes key. This field makes the panel key
+// itself and takes first responder, which is what a non-activating panel is
+// for: it gets the keys while the app you were using stays in front.
 final class TypingField: NSTextField {
     override var acceptsFirstResponder: Bool { true }
 
@@ -14,7 +14,6 @@ final class TypingField: NSTextField {
     }
 
     func takeKeyboard() {
-        NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(self)
     }

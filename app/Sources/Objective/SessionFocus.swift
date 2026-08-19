@@ -82,7 +82,10 @@ enum SessionFocus {
             trace("jump \(item.text) tty=\(plan.tty ?? "-") marked=\(marked) exact=\(exact) contains=\(plan.contains)")
 
             for app in plan.apps {
-                DispatchQueue.main.async { app.activate(options: []) }
+                // Strictly ordered: the terminal comes forward first, then the
+                // right window is raised. An activation that lands afterwards
+                // would pull the terminal's last window back over it.
+                DispatchQueue.main.sync { app.activate(options: []) }
                 let element = AXUIElementCreateApplication(app.processIdentifier)
                 // Ghostty publishes its windows only while it is the active
                 // app, and the new title needs a moment to arrive.
@@ -118,7 +121,7 @@ enum SessionFocus {
         }
         AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
-        DispatchQueue.main.async { app.activate(options: []) }
+        DispatchQueue.main.sync { app.activate(options: []) }
     }
 
     private static func search(

@@ -2,9 +2,10 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-// Borderless windows refuse key status by default, and a non-activating panel
-// never takes the keyboard from the app you were using, so the reply field
-// stayed dead. This panel can become key, and a click on it activates the app.
+// Borderless windows refuse key status by default. This one may become key, so
+// the answer box can take the keyboard when you click into it. The panel stays
+// non-activating: a click that answers or jumps must not pull the front app
+// away from what it was doing, and a jump would bounce straight back.
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 
@@ -76,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         panel = OverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 340, height: 120),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -88,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
+        panel.becomesKeyOnlyIfNeeded = true
         panel.contentView = hosting
         panel.delegate = self
 
