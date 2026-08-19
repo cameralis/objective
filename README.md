@@ -58,8 +58,31 @@ claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
 Each MCP server is one Claude Code session, so it knows the session id, the project, and
 the terminal device of its agent. While the agent waits, the server renames that terminal
 window to a marker only this item uses, which also makes the waiting agent visible in the
-tab bar. The overlay activates the terminal and raises exactly that window or tab through
-accessibility. macOS asks once for permission.
+tab bar. Claude Code owns that title and repaints it, so the overlay writes the marker again,
+to the terminal device of the agent, at the moment you click. It then raises exactly that
+window or tab through the accessibility API, which macOS asks about once, in Privacy &
+Security > Accessibility. An item that carries no marker falls back to the project name, and
+to every terminal that runs now. If nothing matches, the app tells you in a notification.
+
+An ad-hoc signature is different after each build, so macOS drops both permissions on every
+`make run`. Build with a stable identity to keep them: put the identity in `.signid` (the file
+is ignored by git), or pass it on the command line.
+
+```sh
+security find-identity -v -p codesigning
+echo "Apple Development: Your Name (XXXXXXXXXX)" > .signid
+make run
+```
+
+If the switch in the Accessibility list is on but the jump still says the app is not trusted,
+the entry belongs to the old signature. Clear it once and allow it again:
+
+```sh
+tccutil reset Accessibility io.github.cameralis.objective
+```
+
+Each jump writes one line to `~/Library/Application Support/Objective/focus.log`, which says
+what was searched and what was raised.
 
 ## The shared bot (recommended)
 

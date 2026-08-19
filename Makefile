@@ -1,4 +1,9 @@
 APP_NAME = Objective
+# An ad-hoc signature changes on every build, so macOS drops the Accessibility
+# and Automation grants each time, and the jump to the agent stops working.
+# Put a stable identity in .signid (see `security find-identity -v -p
+# codesigning`) to keep the grants, or pass SIGN_ID= on the command line.
+SIGN_ID ?= $(shell cat .signid 2>/dev/null || echo -)
 BUILD_DIR = build
 BUNDLE = $(BUILD_DIR)/$(APP_NAME).app
 INSTALL_DIR = $(HOME)/Applications
@@ -24,10 +29,11 @@ bundle: build icon
 	cp app/.build/release/$(APP_NAME) $(BUNDLE)/Contents/MacOS/$(APP_NAME)
 	cp app/Info.plist $(BUNDLE)/Contents/Info.plist
 	cp $(BUILD_DIR)/AppIcon.icns $(BUNDLE)/Contents/Resources/AppIcon.icns
-	codesign --force --sign - $(BUNDLE)
+	codesign --force --sign "$(SIGN_ID)" $(BUNDLE)
 
 install: bundle
 	mkdir -p $(INSTALL_DIR)
+	-pkill -x $(APP_NAME)
 	rm -rf $(INSTALL_DIR)/$(APP_NAME).app
 	cp -R $(BUNDLE) $(INSTALL_DIR)/$(APP_NAME).app
 

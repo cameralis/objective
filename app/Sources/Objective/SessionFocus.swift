@@ -1,99 +1,244 @@
 import AppKit
+import ApplicationServices
 import Foundation
+import UserNotifications
 
 // Brings the agent that asked to the front.
 //
-// The MCP server renames the agent's terminal window while it waits, so the
-// marker is unique even when two agents work in the same repo. Accessibility
-// can then raise that window, or click its tab when it sits in the background.
+// Claude Code owns the terminal title and repaints it, so a marker written
+// when the question was asked is often gone by the time you click. The app
+// therefore writes the marker again, to the agent's own terminal device, at
+// the moment of the click, and then looks for that exact title through the
+// accessibility API. Older items carry no terminal device, so the search falls
+// back to the stored marker, the project, and the source tag.
 enum SessionFocus {
     static func isAgentAlive(_ origin: ItemOrigin?) -> Bool {
         guard let pid = origin?.pid, pid > 1 else { return true }
         return kill(pid_t(pid), 0) == 0 || errno == EPERM
     }
 
-    static func canFocus(_ origin: ItemOrigin?) -> Bool {
-        origin?.marker != nil && appName(for: origin?.terminal) != nil
+    // MARK: - What to look for, and where
+
+    private struct Plan {
+        var apps: [NSRunningApplication]
+        var tty: String?
+        var mark: String?
+        var exact: [String]
+        var contains: [String]
+
+        var isEmpty: Bool { apps.isEmpty || (mark == nil && exact.isEmpty && contains.isEmpty) }
     }
 
-    static func focus(_ origin: ItemOrigin?) {
-        guard let origin, let app = appName(for: origin.terminal) else { return }
-        activate(app)
+    private static func plan(for item: ObjectiveItem) -> Plan {
+        let origin = item.origin
+        let name = origin?.project ?? item.source
+        let device = origin?.tty ?? nil
+        let tty = (device?.isEmpty == false) ? device : nil
+        // Reuse the marker the server wrote, so both spellings match.
+        let mark = tty == nil ? nil : (origin?.marker ?? "◆ \(name ?? "agent") · \(origin?.code ?? "?")")
 
-        // Ghostty only publishes its windows to accessibility while it is the
-        // active app, so the script activates it and waits before it looks.
-        let script = """
-        tell application "System Events"
-            if not (exists process "\(app)") then return "no process"
-            tell process "\(app)"
-                set frontmost to true
-                repeat 20 times
-                    if (count of windows) > 0 then exit repeat
-                    delay 0.1
-                end repeat
-                set marker to "\(escaped(origin.marker ?? ""))"
-                set project to "\(escaped(origin.project ?? ""))"
-                repeat with w in windows
-                    if name of w is marker then
-                        perform action "AXRaise" of w
-                        return "window"
-                    end if
-                    try
-                        repeat with t in (every radio button of tab group 1 of w)
-                            if name of t is marker then
-                                click t
-                                perform action "AXRaise" of w
-                                return "tab"
-                            end if
-                        end repeat
-                    end try
-                end repeat
-                repeat with w in windows
-                    if name of w contains project then
-                        perform action "AXRaise" of w
-                        return "project"
-                    end if
-                end repeat
-            end tell
-        end tell
-        return "not found"
-        """
+        var exact: [String] = []
+        for candidate in [mark, origin?.marker] {
+            if let candidate, !candidate.isEmpty, !exact.contains(candidate) { exact.append(candidate) }
+        }
+        var contains: [String] = []
+        for candidate in [origin?.project, item.source] {
+            if let candidate, !candidate.isEmpty, !contains.contains(candidate) { contains.append(candidate) }
+        }
 
-        // Off the main thread: the first run shows the Automation prompt.
+        return Plan(apps: apps(for: origin?.terminal), tty: tty, mark: mark, exact: exact, contains: contains)
+    }
+
+    static func canFocus(_ item: ObjectiveItem) -> Bool {
+        !plan(for: item).isEmpty
+    }
+
+    // MARK: - The jump
+
+    static func focus(_ item: ObjectiveItem) {
+        let plan = plan(for: item)
+        guard !plan.isEmpty else {
+            trace("no plan for \(item.text)")
+            return
+        }
+        guard AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        ) else {
+            trace("not trusted for accessibility")
+            notify(
+                "Objective needs Accessibility",
+                "Allow Objective in Privacy & Security > Accessibility, then click the item again."
+            )
+            return
+        }
+
+        // The title write and the accessibility poll both take time.
         DispatchQueue.global(qos: .userInitiated).async {
-            var error: NSDictionary?
-            NSAppleScript(source: script)?.executeAndReturnError(&error)
-            if let error {
-                NSLog("focus failed: \(error)")
+            var exact = plan.exact
+            let marked = plan.tty.map { tty in plan.mark.map { setTitle($0, on: tty) } ?? false } ?? false
+            if marked, let mark = plan.mark {
+                exact = [mark] + exact.filter { $0 != mark }
             }
-            DispatchQueue.main.async { activate(app) }
+            trace("jump \(item.text) tty=\(plan.tty ?? "-") marked=\(marked) exact=\(exact) contains=\(plan.contains)")
+
+            for app in plan.apps {
+                DispatchQueue.main.async { app.activate(options: []) }
+                let element = AXUIElementCreateApplication(app.processIdentifier)
+                // Ghostty publishes its windows only while it is the active
+                // app, and the new title needs a moment to arrive.
+                for attempt in 0..<12 {
+                    usleep(80_000)
+                    let windows = list(element, kAXWindowsAttribute)
+                    if windows.isEmpty { continue }
+                    if let hit = search(windows, exact: exact, contains: attempt >= 4 ? plan.contains : []) {
+                        trace("raised \(title(of: hit.tab ?? hit.window)) in \(app.localizedName ?? "?")")
+                        raise(hit, in: app)
+                        // The marker did its work. Give the tab its name back,
+                        // unless the agent still waits and owns that marker.
+                        if marked, !item.isBlocking, let tty = plan.tty, let name = plan.contains.first {
+                            _ = setTitle(name, on: tty)
+                        }
+                        return
+                    }
+                    if attempt == 11 {
+                        trace("no match in \(app.localizedName ?? "?"): \(windows.map { title(of: $0) })")
+                    }
+                }
+            }
+            notify(
+                "No window found",
+                "Objective could not find the terminal of \(plan.contains.first ?? "that agent")."
+            )
         }
     }
 
-    private static func activate(_ app: String) {
-        let running = NSWorkspace.shared.runningApplications.first {
-            $0.localizedName?.caseInsensitiveCompare(app) == .orderedSame
+    private static func raise(_ hit: (window: AXUIElement, tab: AXUIElement?), in app: NSRunningApplication) {
+        if let tab = hit.tab {
+            AXUIElementPerformAction(tab, kAXPressAction as CFString)
         }
-        running?.activate(options: [])
+        AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
+        DispatchQueue.main.async { app.activate(options: []) }
     }
 
-    // TERM_PROGRAM to the application name accessibility knows.
-    private static func appName(for terminal: String?) -> String? {
-        switch terminal?.lowercased() {
-        case "ghostty": return "ghostty" // its accessibility name is lowercase
-        case "iterm.app": return "iTerm2"
-        case "apple_terminal": return "Terminal"
-        case "warpterminal": return "Warp"
-        case "wezterm": return "WezTerm"
-        case "kitty": return "kitty"
-        case "alacritty": return "Alacritty"
-        case "vscode": return "Code"
-        default: return nil
+    private static func search(
+        _ windows: [AXUIElement],
+        exact: [String],
+        contains: [String]
+    ) -> (window: AXUIElement, tab: AXUIElement?)? {
+        func hit(_ title: String) -> Bool {
+            if exact.contains(title) { return true }
+            return contains.contains { !$0.isEmpty && title.localizedCaseInsensitiveContains($0) }
+        }
+        // A window title only shows the active tab, so tabs are searched first.
+        for window in windows {
+            for tab in tabs(of: window) where hit(title(of: tab)) {
+                return (window, tab)
+            }
+        }
+        for window in windows where hit(title(of: window)) {
+            return (window, nil)
+        }
+        return nil
+    }
+
+    // MARK: - Accessibility helpers
+
+    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value
+    }
+
+    private static func list(_ element: AXUIElement, _ name: String) -> [AXUIElement] {
+        (attribute(element, name) as? [AXUIElement]) ?? []
+    }
+
+    private static func title(of element: AXUIElement) -> String {
+        (attribute(element, kAXTitleAttribute) as? String) ?? ""
+    }
+
+    private static func role(of element: AXUIElement) -> String {
+        (attribute(element, kAXRoleAttribute) as? String) ?? ""
+    }
+
+    // The tab bar sits a few levels below the window, so walk down to it.
+    private static func tabs(of window: AXUIElement) -> [AXUIElement] {
+        var queue = list(window, kAXChildrenAttribute)
+        for _ in 0..<5 {
+            var next: [AXUIElement] = []
+            for element in queue {
+                if role(of: element) == kAXTabGroupRole {
+                    return list(element, kAXChildrenAttribute)
+                        .filter { role(of: $0) == kAXRadioButtonRole }
+                }
+                next.append(contentsOf: list(element, kAXChildrenAttribute))
+            }
+            if next.isEmpty { break }
+            queue = next
+        }
+        return []
+    }
+
+    // MARK: - The terminal
+
+    // An escape sequence written to the agent's terminal device renames that
+    // window or tab, and stays invisible in the text.
+    private static func setTitle(_ title: String, on tty: String) -> Bool {
+        guard let handle = FileHandle(forWritingAtPath: "/dev/\(tty)"),
+              let data = "\u{1b}]2;\(title)\u{7}".data(using: .utf8)
+        else { return false }
+        defer { try? handle.close() }
+        do { try handle.write(contentsOf: data) } catch { return false }
+        return true
+    }
+
+    private static let terminals: [String: String] = [
+        "ghostty": "com.mitchellh.ghostty",
+        "iterm.app": "com.googlecode.iterm2",
+        "apple_terminal": "com.apple.Terminal",
+        "warpterminal": "dev.warp.Warp-Stable",
+        "wezterm": "com.github.wez.wezterm",
+        "kitty": "net.kovidgoyal.kitty",
+        "alacritty": "org.alacritty",
+        "vscode": "com.microsoft.VSCode",
+    ]
+
+    // The item names its terminal. An older item names none, so every terminal
+    // that runs now is a candidate.
+    private static func apps(for terminal: String?) -> [NSRunningApplication] {
+        var wanted = Array(terminals.values)
+        if let key = terminal?.lowercased(), let known = terminals[key] { wanted = [known] }
+        return NSWorkspace.shared.runningApplications.filter {
+            guard let id = $0.bundleIdentifier else { return false }
+            return wanted.contains(id)
         }
     }
 
-    private static func escaped(_ value: String) -> String {
-        value.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+    // One line for each jump, so a failure can be read instead of guessed.
+    private static func trace(_ message: String) {
+        let line = "\(Date().formatted(date: .omitted, time: .standard)) \(message)\n"
+        let file = StatePaths.directory.appendingPathComponent("focus.log")
+        guard let data = line.data(using: .utf8) else { return }
+        // Only the recent jumps are interesting, so the file stays small.
+        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        if (size ?? 0) > 32_000 { try? FileManager.default.removeItem(at: file) }
+        if let handle = try? FileHandle(forWritingTo: file) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: file)
+        }
+    }
+
+    private static func notify(_ title: String, _ body: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        )
     }
 }

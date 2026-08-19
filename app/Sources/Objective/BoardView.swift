@@ -38,7 +38,7 @@ struct BoardView: View {
                         isNew: store.newIDs.contains(item.id),
                         onToggle: { store.toggle(item.id) },
                         onAnswer: { store.answer(item.id, with: $0) },
-                        onJump: { SessionFocus.focus(item.origin) }
+                        onJump: { SessionFocus.focus(item) }
                     )
                     .transition(.asymmetric(
                         insertion: .move(edge: .top).combined(with: .opacity),
@@ -110,11 +110,11 @@ private struct ItemRow: View {
 
     @State private var reply = ""
     @State private var writingReply = false
-    @FocusState private var replyFocused: Bool
+    @State private var replyFocused = false
 
     private var accent: Color { item.isUrgent ? .red : .accentColor }
     private var agentGone: Bool { item.isOpen && !SessionFocus.isAgentAlive(item.origin) }
-    private var canJump: Bool { item.isOpen && !agentGone && SessionFocus.canFocus(item.origin) }
+    private var canJump: Bool { item.isOpen && !agentGone && SessionFocus.canFocus(item) }
     // A pure permission question needs no text box; a fact question keeps one
     // for the answer that is not on a button.
     private var showsReplyField: Bool {
@@ -134,45 +134,25 @@ private struct ItemRow: View {
                 .buttonStyle(.plain)
                 .help("Mark done")
 
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(item.text)
-                            .font(.system(size: 13, weight: .medium))
-                            .strikethrough(!item.isOpen, color: .secondary)
-                            .foregroundStyle(item.isOpen ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                        if let source = item.source, !source.isEmpty {
-                            Text(source)
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1.5)
-                                .background(.quaternary, in: Capsule())
+                // A button, not a tap gesture: a gesture ignores the first
+                // click that arrives while the overlay's app is not active,
+                // which is every click you make while you work elsewhere.
+                Button { if canJump { onJump() } } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        summary
+                        Spacer(minLength: 0)
+                        if canJump {
+                            Image(systemName: "arrow.up.forward.app")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
                         }
                     }
-                    if let detail = item.detail, !detail.isEmpty {
-                        Text(detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    if item.isOpen { statusLine }
-                    if !item.isOpen, let answer = item.answer, !answer.isEmpty {
-                        Label(answer, systemImage: "arrowshape.turn.up.left.fill")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.green)
-                    }
+                    .contentShape(Rectangle())
                 }
-                .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                if canJump {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
+                .buttonStyle(.plain)
+                // The board routes; it does not try to be the conversation.
+                .help(canJump ? "Go to the agent that asked" : "")
             }
-            .contentShape(Rectangle())
-            // The board routes; it does not try to be the conversation.
-            .onTapGesture { if canJump { onJump() } }
-            .help(canJump ? "Go to the agent that asked" : "")
 
             if item.isOpen, let choices = item.choices, !choices.isEmpty {
                 choiceButtons(choices)
@@ -184,15 +164,8 @@ private struct ItemRow: View {
                     Image(systemName: "arrowshape.turn.up.left")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    TextField("Your answer…", text: $reply)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12))
-                        .focused($replyFocused)
-                        .onSubmit {
-                            let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !trimmed.isEmpty else { return }
-                            onAnswer(trimmed)
-                        }
+                    ReplyField(text: $reply, focusNow: $replyFocused) { onAnswer($0) }
+                        .frame(height: 16)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
@@ -212,6 +185,37 @@ private struct ItemRow: View {
         )
         .animation(.easeOut(duration: 0.8), value: isNew)
         .geometryGroup()
+    }
+
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(item.text)
+                    .font(.system(size: 13, weight: .medium))
+                    .strikethrough(!item.isOpen, color: .secondary)
+                    .foregroundStyle(item.isOpen ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                if let source = item.source, !source.isEmpty {
+                    Text(source)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
+            if let detail = item.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            if item.isOpen { statusLine }
+            if !item.isOpen, let answer = item.answer, !answer.isEmpty {
+                Label(answer, systemImage: "arrowshape.turn.up.left.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.green)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     // Says why this item is at the top: an agent is stalled inside its tool

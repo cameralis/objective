@@ -2,10 +2,45 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
-// Borderless windows refuse key status by default. The reply text field
-// needs it, so allow it while the panel stays non-activating.
+// Borderless windows refuse key status by default, and a non-activating panel
+// never takes the keyboard from the app you were using, so the reply field
+// stayed dead. This panel can become key, and a click on it activates the app.
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
+
+    // A non-activating panel never makes its app active, so the keyboard keeps
+    // going to the terminal, and the reply field stays dead. The panel becomes
+    // key only when a view needs it, which is the text field, so activating
+    // here costs no focus anywhere else.
+    // A menu bar extra has no Edit menu, and the standard editing shortcuts
+    // travel through it. Without this, Command-V in the reply field does
+    // nothing. Send the shortcut down the responder chain instead.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if super.performKeyEquivalent(with: event) { return true }
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command), flags.subtracting([.command, .shift]).isEmpty,
+              let key = event.charactersIgnoringModifiers?.lowercased()
+        else { return false }
+
+        let shifted = flags.contains(.shift)
+        let action: Selector?
+        switch key {
+        case "v": action = shifted ? nil : #selector(NSText.paste(_:))
+        case "c": action = shifted ? nil : #selector(NSText.copy(_:))
+        case "x": action = shifted ? nil : #selector(NSText.cut(_:))
+        case "a": action = shifted ? nil : #selector(NSText.selectAll(_:))
+        case "z": action = shifted ? Selector(("redo:")) : Selector(("undo:"))
+        default: action = nil
+        }
+        guard let action else { return false }
+        return NSApp.sendAction(action, to: nil, from: self)
+    }
+}
+
+// An inactive app swallows the first click in its window, which would cost you
+// one click for every answer. This view takes that click as well.
+final class BoardHostingView: NSHostingView<BoardView> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 @MainActor
@@ -13,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
 
     private var panel: NSPanel!
-    private var hosting: NSHostingView<BoardView>!
+    private var hosting: BoardHostingView!
     private var statusItem: NSStatusItem!
 
     private let originKey = "panelOrigin"
@@ -31,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - Panel
 
     private func setUpPanel() {
-        hosting = NSHostingView(rootView: BoardView(store: Store.shared))
+        hosting = BoardHostingView(rootView: BoardView(store: Store.shared))
         // When the panel becomes key, the glass backdrop paints the full
         // square window bounds. Clip it to the card's rounded shape.
         hosting.wantsLayer = true
@@ -41,7 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         panel = OverlayPanel(
             contentRect: NSRect(x: 0, y: 0, width: 340, height: 120),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
@@ -53,7 +88,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
-        panel.becomesKeyOnlyIfNeeded = true
         panel.contentView = hosting
         panel.delegate = self
 
@@ -68,6 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Keep the top edge in place while the height changes.
         frame.origin.y = frame.maxY - size.height
         frame.size = size
+        // A long queue must not push the last items off the screen edge,
+        // where nothing can be clicked any more.
+        if let screen = panel.screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            frame.origin.y = min(max(frame.origin.y, visible.minY), max(visible.maxY - frame.height, visible.minY))
+            frame.origin.x = min(max(frame.origin.x, visible.minX), max(visible.maxX - frame.width, visible.minX))
+        }
         panel.setFrame(frame, display: true, animate: false)
         panel.invalidateShadow()
     }
