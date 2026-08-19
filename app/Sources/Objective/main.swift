@@ -3,9 +3,8 @@ import SwiftUI
 import UserNotifications
 
 // Borderless windows refuse key status by default. This one may become key, so
-// the answer box can take the keyboard when you click into it. The panel stays
-// non-activating: a click that answers or jumps must not pull the front app
-// away from what it was doing, and a jump would bounce straight back.
+// the answer box can take the keys, which is what a non-activating panel is
+// for: the board answers and jumps without ever pulling the front app away.
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 

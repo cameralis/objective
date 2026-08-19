@@ -82,10 +82,9 @@ enum SessionFocus {
             trace("jump \(item.text) tty=\(plan.tty ?? "-") marked=\(marked) exact=\(exact) contains=\(plan.contains)")
 
             for app in plan.apps {
-                // Strictly ordered: the terminal comes forward first, then the
-                // right window is raised. An activation that lands afterwards
-                // would pull the terminal's last window back over it.
-                DispatchQueue.main.sync { app.activate(options: []) }
+                // The terminal comes forward first, then the right window is
+                // raised inside it.
+                bringForward(app)
                 let element = AXUIElementCreateApplication(app.processIdentifier)
                 // Ghostty publishes its windows only while it is the active
                 // app, and the new title needs a moment to arrive.
@@ -115,13 +114,60 @@ enum SessionFocus {
         }
     }
 
+    // A terminal restores its own last window and tab when it comes forward, so
+    // the choice is made again after the activation, until it holds.
     private static func raise(_ hit: (window: AXUIElement, tab: AXUIElement?), in app: NSRunningApplication) {
-        if let tab = hit.tab {
-            AXUIElementPerformAction(tab, kAXPressAction as CFString)
+        bringForward(app)
+        for attempt in 0..<5 {
+            AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
+            if let tab = hit.tab {
+                AXUIElementPerformAction(tab, kAXPressAction as CFString)
+            }
+            usleep(attempt == 0 ? 60_000 : 150_000)
+            if settled(hit) { break }
+            if attempt == 4 { trace("could not hold \(title(of: hit.tab ?? hit.window))") }
         }
-        AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
-        AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
-        DispatchQueue.main.sync { app.activate(options: []) }
+        // Says whether the terminal kept the front, or something took it back.
+        var report = ""
+        for wait in [100_000, 400_000, 1_000_000] as [UInt32] {
+            usleep(wait)
+            let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+            report += " \(front)"
+        }
+        trace("after jump:\(report) tabHeld=\(settled(hit))")
+    }
+
+    // A background app may not hand the front to another app: NSRunningApplication
+    // .activate is refused, or it holds for a moment and falls back. Opening the
+    // app that already runs is the same move the `open -a` command makes, and it
+    // works from here.
+    private static func bringForward(_ app: NSRunningApplication) {
+        guard let url = app.bundleURL else {
+            _ = DispatchQueue.main.sync { app.activate(options: []) }
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        let opened = DispatchSemaphore(value: 0)
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in
+            opened.signal()
+        }
+        _ = opened.wait(timeout: .now() + 2)
+        // The front changes a moment after the call returns.
+        for _ in 0..<20 {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier {
+                return
+            }
+            usleep(50_000)
+        }
+    }
+
+    private static func settled(_ hit: (window: AXUIElement, tab: AXUIElement?)) -> Bool {
+        if let tab = hit.tab, (attribute(tab, kAXValueAttribute) as? NSNumber)?.intValue != 1 {
+            return false
+        }
+        return (attribute(hit.window, kAXMainAttribute) as? NSNumber)?.boolValue ?? false
     }
 
     private static func search(
@@ -224,8 +270,8 @@ enum SessionFocus {
         let file = StatePaths.directory.appendingPathComponent("focus.log")
         guard let data = line.data(using: .utf8) else { return }
         // Only the recent jumps are interesting, so the file stays small.
-        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        if (size ?? 0) > 32_000 { try? FileManager.default.removeItem(at: file) }
+        let size = (try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        if size > 32_000 { try? FileManager.default.removeItem(at: file) }
         if let handle = try? FileHandle(forWritingTo: file) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()
