@@ -94,7 +94,7 @@ enum SessionFocus {
                     if windows.isEmpty { continue }
                     if let hit = search(windows, exact: exact, contains: attempt >= 4 ? plan.contains : []) {
                         trace("raised \(title(of: hit.tab ?? hit.window)) in \(app.localizedName ?? "?")")
-                        raise(hit, in: app)
+                        raise(hit)
                         // The marker did its work. Give the tab its name back,
                         // unless the agent still waits and owns that marker.
                         if marked, !item.isBlocking, let tty = plan.tty, let name = plan.contains.first {
@@ -114,28 +114,24 @@ enum SessionFocus {
         }
     }
 
-    // A terminal restores its own last window and tab when it comes forward, so
-    // the choice is made again after the activation, until it holds.
-    private static func raise(_ hit: (window: AXUIElement, tab: AXUIElement?), in app: NSRunningApplication) {
-        bringForward(app)
-        for attempt in 0..<5 {
-            AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
-            if let tab = hit.tab {
-                AXUIElementPerformAction(tab, kAXPressAction as CFString)
-            }
-            usleep(attempt == 0 ? 60_000 : 150_000)
-            if settled(hit) { break }
-            if attempt == 4 { trace("could not hold \(title(of: hit.tab ?? hit.window))") }
+    // A terminal restores its own last window and tab as it comes forward, so
+    // the tab is chosen once more after that, and only if it did not hold.
+    // More attempts than this flicker on the screen and buy nothing.
+    private static func raise(_ hit: (window: AXUIElement, tab: AXUIElement?)) {
+        AXUIElementSetAttributeValue(hit.window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        AXUIElementPerformAction(hit.window, kAXRaiseAction as CFString)
+        if let tab = hit.tab {
+            AXUIElementPerformAction(tab, kAXPressAction as CFString)
         }
-        // Says whether the terminal kept the front, or something took it back.
-        var report = ""
-        for wait in [100_000, 400_000, 1_000_000] as [UInt32] {
-            usleep(wait)
-            let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
-            report += " \(front)"
+        usleep(300_000)
+        if settled(hit) { return }
+
+        if let tab = hit.tab {
+            AXUIElementPerformAction(tab, kAXPressAction as CFString)
         }
-        trace("after jump:\(report) tabHeld=\(settled(hit))")
+        usleep(300_000)
+        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? "?"
+        trace("second try: front=\(front) held=\(settled(hit))")
     }
 
     // A background app may not hand the front to another app: NSRunningApplication
