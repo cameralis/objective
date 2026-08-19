@@ -79,16 +79,19 @@ final class Store: ObservableObject {
     // MARK: - Actions
 
     func toggle(_ id: String) {
+        var closed = false
         mutate { state in
             guard let i = state.items.firstIndex(where: { $0.id == id }) else { return }
             if state.items[i].isOpen {
                 state.items[i].status = "done"
                 state.items[i].doneAt = Date().timeIntervalSince1970
+                closed = true
             } else {
                 state.items[i].status = "open"
                 state.items[i].doneAt = nil
             }
         }
+        if closed { Relay.close(id, answer: nil) }
     }
 
     func answer(_ id: String, with text: String) {
@@ -100,17 +103,21 @@ final class Store: ObservableObject {
             state.items[i].status = "done"
             state.items[i].doneAt = now
         }
+        Relay.close(id, answer: text)
         NSSound(named: "Pop")?.play()
     }
 
     func clearAll() {
+        var closed: [String] = []
         mutate { state in
             let now = Date().timeIntervalSince1970
             for i in state.items.indices where state.items[i].isOpen {
                 state.items[i].status = "done"
                 state.items[i].doneAt = now
+                closed.append(state.items[i].id)
             }
         }
+        for id in closed { Relay.close(id, answer: nil) }
     }
 
     // MARK: - Loading and watching

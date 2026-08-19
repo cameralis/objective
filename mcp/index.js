@@ -152,6 +152,12 @@ function answerLocally(id, answer) {
   });
 }
 
+// Closing anywhere closes everywhere: the chat message follows the board.
+function closeOnRelay(id, answer) {
+  const link = relay.relayConfig();
+  if (link) relay.closeItem(link, id, answer ?? null).catch(() => {});
+}
+
 // Waits on the overlay and on the shared bot at the same time. The first
 // answer wins, and the other side is brought up to date.
 async function waitForAnswer(id, timeoutSeconds) {
@@ -376,6 +382,8 @@ server.registerTool(
         found = true;
       }
     });
+    // The chat message must catch up when the answer arrived somewhere else.
+    if (found) closeOnRelay(id, answer);
     return textResult({ ok: found });
   }
 );
@@ -394,6 +402,7 @@ server.registerTool(
       s.items = s.items.filter((i) => i.id !== id);
       found = s.items.length < before;
     });
+    if (found) closeOnRelay(id, null);
     return textResult({ ok: found });
   }
 );
@@ -408,10 +417,14 @@ server.registerTool(
     },
   },
   async ({ scope }) => {
+    let removed = [];
     mutate((s) => {
+      const gone = scope === "all" ? s.items : s.items.filter((i) => i.status !== "open");
+      removed = gone.map((i) => i.id);
       s.items =
         scope === "all" ? [] : s.items.filter((i) => i.status === "open");
     });
+    for (const id of removed) closeOnRelay(id, null);
     return textResult({ ok: true });
   }
 );
