@@ -134,6 +134,10 @@ pays nothing for waiting.
 Pass `wait: false` for an item that does not block the agent, then `objective_wait` later if
 the answer turns out to matter.
 
+If the agent stops waiting, the question leaves the board. Stopping the tool call, or ending
+the session, removes the item and closes its Telegram message, because nobody is left to read
+the answer.
+
 If you answer in chat instead of on the board, the agent closes the item for you. The
 `scripts/open-objectives-hook.mjs` hook lists the open items on every message, so the agent
 always knows what is still waiting. Register it as a `UserPromptSubmit` hook.

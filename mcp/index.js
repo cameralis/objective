@@ -68,7 +68,9 @@ function textResult(value) {
 // Block until the user answers, checks the item off, or removes it.
 // The state directory is watched, so a click comes back in milliseconds; the
 // one-second poll is only a safety net for missed file events.
-async function waitForItem(id, timeoutSeconds) {
+// `signal` fires when the client stops the tool call or the session ends; the
+// wait must end there too, or the question outlives the agent that asked it.
+async function waitForItem(id, timeoutSeconds, signal) {
   // 0 means wait for as long as the session lives.
   const deadline =
     timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
@@ -80,8 +82,11 @@ async function waitForItem(id, timeoutSeconds) {
   } catch {
     // Fall back to polling only.
   }
+  const onAbort = () => wake?.();
+  signal?.addEventListener("abort", onAbort);
   try {
     for (;;) {
+      if (signal?.aborted) return { result: "cancelled" };
       const item = readState().items.find((i) => i.id === id);
       if (!item) return { result: "removed" };
       if (item.status !== "open") {
@@ -110,6 +115,7 @@ async function waitForItem(id, timeoutSeconds) {
     }
   } finally {
     watcher?.close();
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -158,23 +164,68 @@ function closeOnRelay(id, answer) {
   if (link) relay.closeItem(link, id, answer ?? null).catch(() => {});
 }
 
+// The agent that asked can disappear: the user stops the tool call, or the
+// session ends. Nobody is left to read the answer, so the question goes away
+// instead of sitting on the board as a blocked agent forever. An item the user
+// answered in the same moment is already done, and stays.
+function dropAbandoned(id) {
+  let dropped = false;
+  mutate((s) => {
+    const before = s.items.length;
+    s.items = s.items.filter((i) => !(i.id === id && i.status === "open"));
+    dropped = s.items.length < before;
+  });
+  if (dropped) closeOnRelay(id, null);
+  return dropped;
+}
+
+// Questions this process still waits on, so a kill can clean up after itself.
+const pending = new Map();
+
+let cleanedUp = false;
+function dropAllPending() {
+  if (cleanedUp) return 0;
+  cleanedUp = true;
+  let dropped = 0;
+  for (const [id, origin] of pending) {
+    if (dropAbandoned(id)) dropped += 1;
+    clearWaiting(origin);
+  }
+  pending.clear();
+  return dropped;
+}
+
+for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(name, () => {
+    // The board is written before we go. The short delay is only so the
+    // Telegram message can be closed as well.
+    const dropped = dropAllPending();
+    if (dropped) setTimeout(() => process.exit(0), 300);
+    else process.exit(0);
+  });
+}
+process.on("exit", dropAllPending);
+
 // Waits on the overlay and on the shared bot at the same time. The first
 // answer wins, and the other side is brought up to date.
-async function waitForAnswer(id, timeoutSeconds) {
+async function waitForAnswer(id, timeoutSeconds, signal) {
   const link = relay.relayConfig();
-  if (!link) return waitForItem(id, timeoutSeconds);
+  if (!link) return waitForItem(id, timeoutSeconds, signal);
 
   const controller = new AbortController();
+  const stopRemote = () => controller.abort();
+  signal?.addEventListener("abort", stopRemote);
   const remote = relay
     .waitForAnswer(link, id, controller.signal)
     .then((answer) => ({ from: "telegram", answer }));
-  const local = waitForItem(id, timeoutSeconds).then((outcome) => ({
+  const local = waitForItem(id, timeoutSeconds, signal).then((outcome) => ({
     from: "board",
     outcome,
   }));
 
   const winner = await Promise.race([remote, local]);
   controller.abort();
+  signal?.removeEventListener("abort", stopRemote);
 
   if (winner.from === "telegram") {
     answerLocally(id, winner.answer);
@@ -264,16 +315,10 @@ server.registerTool(
         ),
     },
   },
-  async ({
-    text,
-    detail,
-    choices,
-    allow_reply,
-    urgent,
-    source,
-    wait,
-    timeout_seconds,
-  }) => {
+  async (
+    { text, detail, choices, allow_reply, urgent, source, wait, timeout_seconds },
+    extra
+  ) => {
     const origin = captureOrigin();
     const item = {
       id: randomUUID(),
@@ -314,11 +359,19 @@ server.registerTool(
       }
     });
     markWaiting(origin);
+    pending.set(item.id, origin);
 
+    const signal = extra?.signal;
     try {
-      const outcome = await waitForAnswer(item.id, timeout_seconds ?? 0);
+      const outcome = await waitForAnswer(item.id, timeout_seconds ?? 0, signal);
+      if (outcome.result === "cancelled") {
+        dropAbandoned(item.id);
+        return textResult({ ok: false, id: item.id, result: "cancelled" });
+      }
       return textResult({ ok: true, id: item.id, delivery, ...outcome });
     } finally {
+      pending.delete(item.id);
+      if (signal?.aborted) dropAbandoned(item.id);
       mutate((s) => {
         const stored = s.items.find((i) => i.id === item.id);
         if (stored) stored.waiting = false;
@@ -449,8 +502,8 @@ server.registerTool(
         .describe("Give up after this many seconds. 0 (default) never gives up."),
     },
   },
-  async ({ id, timeout_seconds }) =>
-    textResult(await waitForAnswer(id, timeout_seconds ?? 0))
+  async ({ id, timeout_seconds }, extra) =>
+    textResult(await waitForAnswer(id, timeout_seconds ?? 0, extra?.signal))
 );
 
 await server.connect(new StdioServerTransport());

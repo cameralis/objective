@@ -74,10 +74,12 @@ function userAnswers(id, answer) {
   fs.renameSync(tmp, stateFile);
 }
 
-async function waitForOpenItem() {
+async function waitForOpenItem(text) {
   for (let i = 0; i < 100; i++) {
     try {
-      const open = readBoard().items.filter((x) => x.status === "open");
+      const open = readBoard().items.filter(
+        (x) => x.status === "open" && (text == null || x.text === text)
+      );
       if (open.length) return open[open.length - 1];
     } catch {}
     await sleep(20);
@@ -147,6 +149,41 @@ try {
   );
   assert.equal(timing.result, "timeout");
   assert.match(timing.note, /objective_wait/);
+
+  // 6. Stopping the tool call takes the question off the board: the agent that
+  //    asked is gone, so nobody would ever read the answer.
+  const stopped = call("objective_add", {
+    text: "Paste the issuer id",
+    choices: ["Paste it", "Skip"],
+  });
+  stopped.catch(() => {});
+  const orphan = await waitForOpenItem("Paste the issuer id");
+  notify("notifications/cancelled", {
+    requestId: nextId - 1,
+    reason: "user stopped the tool call",
+  });
+  for (let i = 0; i < 100 && readBoard().items.some((x) => x.id === orphan.id); i++) {
+    await sleep(20);
+  }
+  assert.equal(
+    readBoard().items.some((x) => x.id === orphan.id),
+    false,
+    "a stopped objective_add left its item on the board"
+  );
+
+  // 7. Killing the server does the same for everything it still waits on.
+  const killed = call("objective_add", { text: "Approve the deploy" });
+  killed.catch(() => {});
+  const leftover = await waitForOpenItem("Approve the deploy");
+  server.kill("SIGTERM");
+  for (let i = 0; i < 100 && readBoard().items.some((x) => x.id === leftover.id); i++) {
+    await sleep(20);
+  }
+  assert.equal(
+    readBoard().items.some((x) => x.id === leftover.id),
+    false,
+    "a killed server left its item on the board"
+  );
 
   console.log("all mcp tests passed");
 } catch (err) {
