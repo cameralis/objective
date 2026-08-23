@@ -50,7 +50,10 @@ claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
 - **Blocked first.** An agent stuck inside its tool call sorts to the top and shows how long
   it has waited. An item whose session died greys out and says so.
 - The list scrolls once it is long, so a busy queue never covers the screen.
-- Drag the panel anywhere; the position is remembered.
+- **All clear contracts the panel** to a small capsule badge on the screen edge it hangs from.
+  The next item expands it again. Click the badge to open the card, and the `All clear` row to
+  contract it.
+- Drag the panel anywhere; the position is remembered, and the badge keeps the same corner.
 - Done items are pruned from the state file after one day.
 
 ### How the jump works

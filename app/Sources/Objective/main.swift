@@ -1,6 +1,16 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 import UserNotifications
+
+// Which screen edge the panel hangs from. The card and the badge have very
+// different widths, so the side nearest the screen edge must stay put while
+// the panel contracts, or the badge walks away from where you left the card.
+@MainActor
+final class PanelLayout: ObservableObject {
+    static let shared = PanelLayout()
+    @Published var anchorTrailing = true
+}
 
 // Borderless windows refuse key status by default. This one may become key, so
 // the answer box can take the keys, which is what a non-activating panel is
@@ -52,6 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
 
     private let originKey = "panelOrigin"
+    private let anchorKey = "panelAnchorPoint"
+    private let anchorSideKey = "panelAnchorTrailing"
+
+    // The anchored corner: the top edge, plus the left or right edge, whichever
+    // the panel hangs from. Every resize keeps this point fixed.
+    private var anchorPoint: NSPoint = .zero
+    private var anchorTrailing = true
+    private var isFitting = false
+
+    private let resizeDuration: TimeInterval = 0.34
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -59,14 +79,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setUpStatusItem()
         requestNotificationPermission()
         Store.shared.start()
-        fitPanel()
+        fitPanel(animated: false)
         panel.orderFrontRegardless()
     }
 
     // MARK: - Panel
 
     private func setUpPanel() {
-        hosting = BoardHostingView(rootView: BoardView(store: Store.shared))
+        hosting = BoardHostingView(rootView: BoardView(store: Store.shared, layout: PanelLayout.shared))
         // When the panel becomes key, the glass backdrop paints the full
         // square window bounds. Clip it to the card's rounded shape.
         hosting.wantsLayer = true
@@ -92,17 +112,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.contentView = hosting
         panel.delegate = self
 
-        restoreOrigin()
+        restoreAnchor()
     }
 
-    func fitPanel() {
+    func fitPanel(animated: Bool = true) {
         guard let panel, let hosting else { return }
+        hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        guard size.height > 0, size != panel.frame.size else { return }
-        var frame = panel.frame
-        // Keep the top edge in place while the height changes.
-        frame.origin.y = frame.maxY - size.height
-        frame.size = size
+        guard size.width > 0, size.height > 0 else { return }
+
+        var frame = NSRect(
+            x: anchorTrailing ? anchorPoint.x - size.width : anchorPoint.x,
+            y: anchorPoint.y - size.height,
+            width: size.width,
+            height: size.height
+        )
         // A long queue must not push the last items off the screen edge,
         // where nothing can be clicked any more.
         if let screen = panel.screen ?? NSScreen.main {
@@ -110,8 +134,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             frame.origin.y = min(max(frame.origin.y, visible.minY), max(visible.maxY - frame.height, visible.minY))
             frame.origin.x = min(max(frame.origin.x, visible.minX), max(visible.maxX - frame.width, visible.minX))
         }
-        panel.setFrame(frame, display: true, animate: false)
-        panel.invalidateShadow()
+        guard frame != panel.frame else { return }
+
+        // The card is a wide rectangle and the badge is a small capsule, so the
+        // clip that keeps the glass inside the card must follow the height.
+        let radius = min(22, size.height / 2)
+
+        isFitting = true
+        if animated {
+            hosting.layer?.add(cornerAnimation(to: radius), forKey: "cornerRadius")
+            hosting.layer?.cornerRadius = radius
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = resizeDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(frame, display: true)
+            } completionHandler: {
+                MainActor.assumeIsolated {
+                    self.isFitting = false
+                    panel.invalidateShadow()
+                }
+            }
+        } else {
+            hosting.layer?.cornerRadius = radius
+            panel.setFrame(frame, display: true, animate: false)
+            isFitting = false
+            panel.invalidateShadow()
+        }
+    }
+
+    private func cornerAnimation(to radius: CGFloat) -> CABasicAnimation {
+        let animation = CABasicAnimation(keyPath: "cornerRadius")
+        animation.fromValue = hosting.layer?.cornerRadius ?? radius
+        animation.toValue = radius
+        animation.duration = resizeDuration
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        return animation
     }
 
     func showPanel() {
@@ -126,23 +183,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func restoreOrigin() {
+    private func restoreAnchor() {
         let defaults = UserDefaults.standard
+        if let stored = defaults.string(forKey: anchorKey) {
+            anchorPoint = NSPointFromString(stored)
+            anchorTrailing = defaults.bool(forKey: anchorSideKey)
+            PanelLayout.shared.anchorTrailing = anchorTrailing
+            return
+        }
+        // Before the badge there was only an origin, saved for a card that was
+        // always 340 wide. Read it back as a frame and take the anchor from it.
         if let stored = defaults.string(forKey: originKey) {
-            let origin = NSPointFromString(stored)
-            panel.setFrameOrigin(origin)
-        } else if let screen = NSScreen.main {
+            adoptAnchor(from: NSRect(origin: NSPointFromString(stored), size: panel.frame.size))
+            return
+        }
+        if let screen = NSScreen.main {
             let visible = screen.visibleFrame
-            let origin = NSPoint(
-                x: visible.maxX - panel.frame.width - 24,
-                y: visible.maxY - panel.frame.height - 24
-            )
-            panel.setFrameOrigin(origin)
+            anchorTrailing = true
+            anchorPoint = NSPoint(x: visible.maxX - 24, y: visible.maxY - 24)
+            PanelLayout.shared.anchorTrailing = true
         }
     }
 
+    private func adoptAnchor(from frame: NSRect) {
+        let visible = (panel.screen ?? NSScreen.main)?.visibleFrame ?? frame
+        anchorTrailing = frame.midX > visible.midX
+        anchorPoint = NSPoint(x: anchorTrailing ? frame.maxX : frame.minX, y: frame.maxY)
+        PanelLayout.shared.anchorTrailing = anchorTrailing
+
+        let defaults = UserDefaults.standard
+        defaults.set(NSStringFromPoint(anchorPoint), forKey: anchorKey)
+        defaults.set(anchorTrailing, forKey: anchorSideKey)
+    }
+
     func windowDidMove(_ notification: Notification) {
-        UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: originKey)
+        // A resize moves the window too. Only a drag by hand changes the anchor.
+        guard !isFitting else { return }
+        adoptAnchor(from: panel.frame)
     }
 
     // MARK: - Status item

@@ -9,9 +9,42 @@ private struct ContentHeight: PreferenceKey {
 
 struct BoardView: View {
     @ObservedObject var store: Store
+    @ObservedObject var layout: PanelLayout
     @State private var measuredHeight: CGFloat = 0
+    @State private var peeking = false
+
+    // Nothing waits for you, so the card has nothing to say. It contracts to a
+    // badge that keeps the board in sight without taking a corner of a screen.
+    private var isCollapsed: Bool { store.visibleItems.isEmpty && !peeking }
 
     var body: some View {
+        Group {
+            if isCollapsed {
+                badge
+                    .transition(.scale(scale: 0.86, anchor: layout.anchorTrailing ? .topTrailing : .topLeading).combined(with: .opacity))
+            } else {
+                card
+                    .transition(.opacity)
+            }
+        }
+        // The window grows from the edge it hangs on, so the content must sit
+        // against that same edge while the frame is still on its way.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: badgeAnchor)
+        .animation(.easeInOut(duration: 0.3), value: isCollapsed)
+        .onChange(of: isCollapsed) { _, _ in
+            // The size is read from the view, so let SwiftUI lay it out first.
+            DispatchQueue.main.async { AppDelegate.shared?.fitPanel() }
+        }
+        .onChange(of: store.visibleItems.isEmpty) { _, empty in
+            // A peek lasts until the queue takes over. After that the board
+            // contracts again by itself.
+            if !empty { peeking = false }
+        }
+    }
+
+    private var badgeAnchor: Alignment { layout.anchorTrailing ? .topTrailing : .topLeading }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 6) {
             header
             if store.visibleItems.isEmpty {
@@ -24,7 +57,29 @@ struct BoardView: View {
         .padding(.vertical, 14)
         .frame(width: 340, alignment: .leading)
         .animation(.spring(duration: 0.4), value: store.visibleItems)
-        .glassCard()
+        .glassCard(radius: 22)
+    }
+
+    // One click opens the card again, for the times you want to move the panel
+    // or read what you answered a moment ago.
+    private var badge: some View {
+        Button { peeking = true } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "scope")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("ALL CLEAR")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .tracking(1.6)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 7)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Show the board")
+        .glassCard(radius: 999)
     }
 
     // The queue may be long when many agents work at once, so it scrolls
@@ -89,15 +144,25 @@ struct BoardView: View {
         .padding(.bottom, 4)
     }
 
+    // The card is empty on purpose here, so the row is also the way back to
+    // the badge.
     private var emptyRow: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "sparkles")
-                .font(.system(size: 12))
-            Text("All clear")
-                .font(.system(size: 13))
+        Button { peeking = false } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12))
+                Text("All clear")
+                    .font(.system(size: 13))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(.tertiary)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
         }
-        .foregroundStyle(.tertiary)
-        .padding(.vertical, 6)
+        .buttonStyle(.plain)
+        .help("Contract to a badge")
     }
 }
 
@@ -336,11 +401,12 @@ private struct ChoiceButton: View {
 
 private extension View {
     @ViewBuilder
-    func glassCard() -> some View {
+    func glassCard(radius: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         if #available(macOS 26.0, *) {
-            self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            self.glassEffect(.regular, in: shape)
         } else {
-            self.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            self.background(.ultraThinMaterial, in: shape)
         }
     }
 }
