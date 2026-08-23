@@ -27,14 +27,15 @@ struct BoardView: View {
                     .transition(.opacity)
             }
         }
+        // Report every step of the card's own animation, so the window can
+        // follow it exactly instead of jumping to the size it ends at.
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+            AppDelegate.shared?.resize(to: size)
+        }
         // The window grows from the edge it hangs on, so the content must sit
         // against that same edge while the frame is still on its way.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: badgeAnchor)
         .animation(.easeInOut(duration: 0.3), value: isCollapsed)
-        .onChange(of: isCollapsed) { _, _ in
-            // The size is read from the view, so let SwiftUI lay it out first.
-            DispatchQueue.main.async { AppDelegate.shared?.fitPanel() }
-        }
         .onChange(of: store.visibleItems.isEmpty) { _, empty in
             // A peek lasts until the queue takes over. After that the board
             // contracts again by itself.
@@ -249,6 +250,7 @@ private struct ItemRow: View {
                 .strokeBorder(rowStroke, lineWidth: 1)
         )
         .animation(.easeOut(duration: 0.8), value: isNew)
+        .animation(.snappy(duration: 0.25), value: writingReply)
         .geometryGroup()
     }
 

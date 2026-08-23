@@ -149,7 +149,6 @@ final class Store: ObservableObject {
         if items.contains(where: { !$0.isOpen }) {
             DispatchQueue.main.asyncAfter(deadline: .now() + doneLinger + 0.3) { [weak self] in
                 self?.objectWillChange.send()
-                AppDelegate.shared?.fitPanel()
             }
         }
     }
@@ -188,7 +187,6 @@ final class Store: ObservableObject {
         )
         source.setEventHandler { [weak self] in
             self?.reload()
-            AppDelegate.shared?.fitPanel()
         }
         source.setCancelHandler { [dirFD] in close(dirFD) }
         source.resume()

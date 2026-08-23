@@ -1,5 +1,4 @@
 import AppKit
-import QuartzCore
 import SwiftUI
 import UserNotifications
 
@@ -71,15 +70,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var anchorTrailing = true
     private var isFitting = false
 
-    private let resizeDuration: TimeInterval = 0.34
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
         setUpPanel()
         setUpStatusItem()
         requestNotificationPermission()
         Store.shared.start()
-        fitPanel(animated: false)
+        fitPanel()
         panel.orderFrontRegardless()
     }
 
@@ -115,11 +112,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         restoreAnchor()
     }
 
-    func fitPanel(animated: Bool = true) {
-        guard let panel, let hosting else { return }
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
-        guard size.width > 0, size.height > 0 else { return }
+    // The board reports the size of its own card, once for every frame of its
+    // own animation. The window copies that size, so the glass edge and the
+    // shadow always sit exactly on the card, and no ghost of an older, larger
+    // frame stays behind it.
+    func resize(to size: CGSize) {
+        guard let panel, let hosting, size.width > 1, size.height > 1 else { return }
+        let size = CGSize(width: size.width.rounded(.up), height: size.height.rounded(.up))
 
         var frame = NSRect(
             x: anchorTrailing ? anchorPoint.x - size.width : anchorPoint.x,
@@ -137,38 +136,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard frame != panel.frame else { return }
 
         // The card is a wide rectangle and the badge is a small capsule, so the
-        // clip that keeps the glass inside the card must follow the height.
-        let radius = min(22, size.height / 2)
+        // clip that keeps the glass inside the window must follow the height.
+        hosting.layer?.cornerRadius = min(22, size.height / 2)
 
         isFitting = true
-        if animated {
-            hosting.layer?.add(cornerAnimation(to: radius), forKey: "cornerRadius")
-            hosting.layer?.cornerRadius = radius
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = resizeDuration
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().setFrame(frame, display: true)
-            } completionHandler: {
-                MainActor.assumeIsolated {
-                    self.isFitting = false
-                    panel.invalidateShadow()
-                }
-            }
-        } else {
-            hosting.layer?.cornerRadius = radius
-            panel.setFrame(frame, display: true, animate: false)
-            isFitting = false
-            panel.invalidateShadow()
-        }
+        panel.setFrame(frame, display: true, animate: false)
+        isFitting = false
+        panel.invalidateShadow()
     }
 
-    private func cornerAnimation(to radius: CGFloat) -> CABasicAnimation {
-        let animation = CABasicAnimation(keyPath: "cornerRadius")
-        animation.fromValue = hosting.layer?.cornerRadius ?? radius
-        animation.toValue = radius
-        animation.duration = resizeDuration
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        return animation
+    // The first frame, before the board has ever reported a size.
+    private func fitPanel() {
+        guard let hosting else { return }
+        hosting.layoutSubtreeIfNeeded()
+        resize(to: hosting.fittingSize)
     }
 
     func showPanel() {
