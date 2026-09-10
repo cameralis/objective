@@ -52,6 +52,11 @@ final class BoardHostingView: NSHostingView<BoardView> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
+// A decorative badge must not steal clicks from the status item below it.
+final class StatusBadgeImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
@@ -59,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var panel: NSPanel!
     private var hosting: BoardHostingView!
     private var statusItem: NSStatusItem!
+    private var enabledMenuItem: NSMenuItem!
+    private var overlayMenuItem: NSMenuItem!
+    private var disabledBadge: StatusBadgeImageView!
+    private let objectiveConfiguration = ObjectiveConfiguration()
 
     private let originKey = "panelOrigin"
     private let anchorKey = "panelAnchorPoint"
@@ -76,8 +85,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setUpStatusItem()
         requestNotificationPermission()
         Store.shared.start()
+        try? objectiveConfiguration.captureCurrentConfiguration()
         fitPanel()
-        panel.orderFrontRegardless()
+        if objectiveConfiguration.isEnabled {
+            panel.orderFrontRegardless()
+        }
     }
 
     // MARK: - Panel
@@ -153,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showPanel() {
+        guard objectiveConfiguration.isEnabled else { return }
         panel.orderFrontRegardless()
     }
 
@@ -207,20 +220,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func setUpStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "scope",
-            accessibilityDescription: "Objective"
-        )
+        setUpStatusIcon()
 
         let menu = NSMenu()
-        menu.addItem(withTitle: "Show / Hide Overlay", action: #selector(toggleFromMenu), keyEquivalent: "")
+        menu.delegate = self
+        enabledMenuItem = menu.addItem(
+            withTitle: "Objective Enabled",
+            action: #selector(toggleObjectiveFromMenu),
+            keyEquivalent: ""
+        )
+        enabledMenuItem.target = self
+        enabledMenuItem.toolTip = "Adds or removes Objective from new Claude Code sessions"
+        menu.addItem(.separator())
+        overlayMenuItem = menu.addItem(withTitle: "Show / Hide Overlay", action: #selector(toggleFromMenu), keyEquivalent: "")
+        overlayMenuItem.target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Objective", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         statusItem.menu = menu
+        updateStatusMenu()
+    }
+
+    private func setUpStatusIcon() {
+        guard let button = statusItem.button else { return }
+
+        let image = NSImage(
+            systemSymbolName: "scope",
+            accessibilityDescription: "Objective"
+        )
+        image?.isTemplate = true
+        button.image = image
+
+        let badgeSymbol = NSImage(
+            systemSymbolName: "xmark.circle.fill",
+            accessibilityDescription: nil
+        )
+        let pointSize = NSImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        let palette = NSImage.SymbolConfiguration(paletteColors: [.white, .systemRed])
+        let badgeImage = badgeSymbol?.withSymbolConfiguration(pointSize.applying(palette))
+        badgeImage?.isTemplate = false
+
+        disabledBadge = StatusBadgeImageView(image: badgeImage ?? NSImage())
+        disabledBadge.translatesAutoresizingMaskIntoConstraints = false
+        disabledBadge.imageScaling = .scaleProportionallyUpOrDown
+        disabledBadge.setAccessibilityElement(false)
+        button.addSubview(disabledBadge)
+
+        NSLayoutConstraint.activate([
+            disabledBadge.widthAnchor.constraint(equalToConstant: 10),
+            disabledBadge.heightAnchor.constraint(equalToConstant: 10),
+            disabledBadge.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -1),
+            disabledBadge.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: 1),
+        ])
     }
 
     @objc private func toggleFromMenu() {
         togglePanel()
+    }
+
+    @objc private func toggleObjectiveFromMenu() {
+        let enable = !objectiveConfiguration.isEnabled
+        do {
+            try objectiveConfiguration.setEnabled(enable)
+            if enable {
+                showPanel()
+            } else {
+                panel.orderOut(nil)
+            }
+            updateStatusMenu()
+        } catch {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Objective could not update Claude Code"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
+    private func updateStatusMenu() {
+        let enabled = objectiveConfiguration.isEnabled
+        enabledMenuItem?.state = enabled ? .on : .off
+        overlayMenuItem?.isEnabled = enabled
+        disabledBadge?.isHidden = enabled
+        statusItem.button?.setAccessibilityLabel(enabled ? "Objective" : "Objective disabled")
     }
 
     // MARK: - Notifications
@@ -230,6 +311,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+}
+
+extension AppDelegate: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        updateStatusMenu()
     }
 }
 

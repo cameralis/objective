@@ -9,6 +9,11 @@ let package = Package(
             name: "Objective",
             path: "Sources/Objective",
             swiftSettings: [.swiftLanguageMode(.v5)]
-        )
+        ),
+        .testTarget(
+            name: "ObjectiveTests",
+            dependencies: ["Objective"],
+            path: "Tests/ObjectiveTests"
+        ),
     ]
 )

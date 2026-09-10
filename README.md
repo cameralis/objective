@@ -22,7 +22,7 @@ on your Mac for it.
 
 ## Parts
 
-- `app/` — native SwiftUI app. A borderless, non-activating glass panel that floats above all windows and spaces. A `scope` icon in the menu bar shows or hides it.
+- `app/` — native SwiftUI app. A borderless, non-activating glass panel that floats above all windows and spaces. A `scope` icon in the menu bar controls it.
 - `mcp/` — MCP server (Node, stdio). Tools: `objective_add`, `objective_list`, `objective_complete`, `objective_remove`, `objective_clear`, `objective_wait`.
 - `relay/` — the Telegram side: one shared bot on a Cloudflare Worker, paired with a code. See `relay/README.md`.
 - Shared state: `~/Library/Application Support/Objective/state.json`. Every part watches the file, so updates are immediate and bidirectional. You can run the overlay, the bot, or both.
@@ -54,6 +54,10 @@ claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
   The next item expands it again. Click the badge to open the card, and the `All clear` row to
   contract it.
 - Drag the panel anywhere; the position is remembered, and the badge keeps the same corner.
+- The menu bar has an **Objective Enabled** setting. Turning it off removes the global
+  Objective instructions and prompt hook, disables the user-scoped MCP server, and hides
+  the overlay. Turning it on restores the saved setup. Start a new Claude Code session after
+  changing it because an open session keeps the tools and instructions it started with.
 - Done items are pruned from the state file after one day.
 
 ### How the jump works
