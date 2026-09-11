@@ -19,6 +19,7 @@ const server = spawn(process.execPath, [path.join(here, "index.js")], {
     ...process.env,
     OBJECTIVE_STATE_DIR: stateDir,
     OBJECTIVE_APP: path.join(stateDir, "no-such-app"),
+    OBJECTIVE_PRESENCE_CHECK_SECONDS: "1",
   },
   stdio: ["pipe", "pipe", process.env.VERBOSE ? "inherit" : "ignore"],
 });
@@ -56,6 +57,17 @@ const payload = (response) => JSON.parse(response.result.content[0].text);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const readBoard = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
+
+// Stands in for the app's reading. The test process is alive, so by default
+// the reading counts as live.
+function setPresence(state, pid = process.pid) {
+  const file = path.join(stateDir, "presence.json");
+  fs.writeFileSync(
+    `${file}.tmp-test`,
+    JSON.stringify({ state, reason: "test", since: Date.now() / 1000, locked: false, realInput: true, pid })
+  );
+  fs.renameSync(`${file}.tmp-test`, file);
+}
 
 // Stands in for a click in the overlay or a button tap in Telegram.
 function userAnswers(id, answer) {
@@ -171,7 +183,52 @@ try {
     "a stopped objective_add left its item on the board"
   );
 
-  // 7. Killing the server does the same for everything it still waits on.
+  // 7. Without the app nobody knows where the user is, so the user says it.
+  assert.equal(payload(await call("objective_presence", {})).state, "unknown");
+  const unknownStep = call("objective_add", { text: "Touch ID for the keychain", at_mac: true });
+  const unknownItem = await waitForOpenItem("Touch ID for the keychain");
+  assert.deepEqual(unknownItem.choices, ["Ready", "Skip"]);
+  userAnswers(unknownItem.id, "Ready");
+  assert.equal(payload(await unknownStep).result, "present");
+
+  // 8. A user at the Mac gets the step at once, and the board says so once.
+  setPresence("present");
+  const presence = payload(await call("objective_presence", {}));
+  assert.equal(presence.state, "present");
+  assert.equal(presence.reason, "test");
+  const atOnce = payload(
+    await call("objective_add", { text: "Touch ID for brew upgrade", at_mac: true })
+  );
+  assert.equal(atOnce.result, "present");
+  const readyItem = readBoard().items.find((x) => x.id === atOnce.id);
+  assert.equal(readyItem.status, "done");
+  assert.ok(readyItem.readyAt, "the board was not told that the user is at the Mac");
+
+  // 9. An unsure user who comes back releases the step, with no click.
+  setPresence("unsure");
+  const comeBack = call("objective_add", { text: "Approve the system dialog", at_mac: true });
+  const waitingItem = await waitForOpenItem("Approve the system dialog");
+  assert.deepEqual(waitingItem.choices, ["Skip"]);
+  let back = false;
+  comeBack.then(() => (back = true));
+  await sleep(300);
+  assert.equal(back, false, "at_mac returned while the user was not at the Mac");
+  setPresence("present");
+  assert.equal(payload(await comeBack).result, "present");
+  assert.equal(readBoard().items.find((x) => x.id === waitingItem.id).answer, "At the Mac");
+
+  // 10. Skip means the agent must not start the step.
+  setPresence("away");
+  const skipped = call("objective_add", { text: "Enter the sudo password", at_mac: true });
+  const skipItem = await waitForOpenItem("Enter the sudo password");
+  userAnswers(skipItem.id, "Skip");
+  assert.equal(payload(await skipped).result, "skipped");
+
+  // 11. A reading from an app that quit says nothing.
+  setPresence("present", 999999);
+  assert.equal(payload(await call("objective_presence", {})).state, "unknown");
+
+  // 12. Killing the server does the same for everything it still waits on.
   const killed = call("objective_add", { text: "Approve the deploy" });
   killed.catch(() => {});
   const leftover = await waitForOpenItem("Approve the deploy");

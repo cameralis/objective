@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import * as relay from "./relay.js";
 import { captureOrigin, markWaiting, clearWaiting } from "./origin.js";
+import { readPresence, settle } from "./presence.js";
+import { until } from "./watch.js";
 
 const STATE_DIR =
   process.env.OBJECTIVE_STATE_DIR ||
@@ -17,6 +19,11 @@ const STATE_FILE = path.join(STATE_DIR, "state.json");
 const APP_PATH =
   process.env.OBJECTIVE_APP ||
   path.join(os.homedir(), "Applications", "Objective.app");
+
+const AT_MAC = "At the Mac";
+const READY = "Ready";
+const SKIP = "Skip";
+const AT_MAC_NOTE = "🖥 Waits for you at the Mac. The agent goes on when you are back.";
 
 function readState() {
   try {
@@ -41,6 +48,10 @@ function mutate(change) {
   return state;
 }
 
+const isOpen = (id) => readState().items.some((i) => i.id === id && i.status === "open");
+
+const watchState = (check, options) => until(STATE_DIR, check, options);
+
 function ensureAppRunning() {
   if (fs.existsSync(APP_PATH)) {
     execFile("open", ["-g", APP_PATH], () => {});
@@ -57,6 +68,7 @@ function itemSummary(item) {
     source: item.source ?? null,
     choices: item.choices ?? null,
     allowReply: item.allowReply ?? false,
+    atMac: item.atMac ?? false,
     answer: item.answer ?? null,
   };
 }
@@ -66,27 +78,14 @@ function textResult(value) {
 }
 
 // Block until the user answers, checks the item off, or removes it.
-// The state directory is watched, so a click comes back in milliseconds; the
-// one-second poll is only a safety net for missed file events.
 // `signal` fires when the client stops the tool call or the session ends; the
 // wait must end there too, or the question outlives the agent that asked it.
 async function waitForItem(id, timeoutSeconds, signal) {
   // 0 means wait for as long as the session lives.
   const deadline =
     timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : Infinity;
-  let wake = null;
-  let watcher = null;
-  try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    watcher = fs.watch(STATE_DIR, () => wake?.());
-  } catch {
-    // Fall back to polling only.
-  }
-  const onAbort = () => wake?.();
-  signal?.addEventListener("abort", onAbort);
-  try {
-    for (;;) {
-      if (signal?.aborted) return { result: "cancelled" };
+  const outcome = await watchState(
+    () => {
       const item = readState().items.find((i) => i.id === id);
       if (!item) return { result: "removed" };
       if (item.status !== "open") {
@@ -96,27 +95,16 @@ async function waitForItem(id, timeoutSeconds, signal) {
           answered: item.answer != null,
         };
       }
-      const left = deadline - Date.now();
-      if (left <= 0) {
+      if (Date.now() >= deadline) {
         return {
           result: "timeout",
           note: "Item is still open. Call objective_wait with the same id to keep waiting.",
         };
       }
-      await new Promise((resolve) => {
-        const timer = setTimeout(finish, Math.min(1000, left));
-        wake = finish;
-        function finish() {
-          clearTimeout(timer);
-          wake = null;
-          resolve();
-        }
-      });
-    }
-  } finally {
-    watcher?.close();
-    signal?.removeEventListener("abort", onAbort);
-  }
+    },
+    { signal, deadline }
+  );
+  return outcome ?? { result: "cancelled" };
 }
 
 // `node mcp/index.js --pair CODE [--url https://relay.example.workers.dev]`
@@ -206,19 +194,76 @@ for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 process.on("exit", dropAllPending);
 
-// Waits on the overlay and on the shared bot at the same time. The first
-// answer wins, and the other side is brought up to date.
-async function waitForAnswer(id, timeoutSeconds, signal) {
+// MARK: - Telegram, when the user is away
+
+// Items this process delivers, by id. Each resolves true once the item is on
+// Telegram, and false when it closed first.
+const deliveries = new Map();
+
+// Telegram is the push notification for when the user is away. An item goes
+// there when the user is away as it arrives, when an unsure user lets its
+// banner pass, or when the user leaves while it is still open.
+function startDelivery(item) {
   const link = relay.relayConfig();
-  if (!link) return waitForItem(id, timeoutSeconds, signal);
+  const delivered = link ? deliverWhenAway(link, item) : Promise.resolve(false);
+  deliveries.set(item.id, delivered);
+  return link ? "board, and Telegram when the user is away" : "board";
+}
+
+async function deliverWhenAway(link, item) {
+  const open = () => isOpen(item.id);
+  for (;;) {
+    const presence = await settle({ isOpen: open });
+    if (presence === "closed") return false;
+    if (presence !== "present") return pushToTelegram(link, item, open);
+    const change = await watchState(() => {
+      if (!open()) return "closed";
+      if (readPresence()?.state !== "present") return "left";
+    });
+    if (change === "closed") return false;
+  }
+}
+
+// A failed push must not leave an away user without the message.
+async function pushToTelegram(link, item, open) {
+  const detail = item.atMac
+    ? [AT_MAC_NOTE, item.detail].filter(Boolean).join("\n")
+    : item.detail;
+  for (;;) {
+    try {
+      await relay.pushItem(link, { ...item, detail });
+      break;
+    } catch (err) {
+      console.error(`Telegram push failed: ${err.message}`);
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      if (!open()) return false;
+    }
+  }
+  // An answer that came in during the push found no message to close.
+  if (!open()) {
+    const stored = readState().items.find((i) => i.id === item.id);
+    relay.closeItem(link, item.id, stored?.answer ?? null).catch(() => {});
+  }
+  return true;
+}
+
+// Waits on the overlay and, once the item is there, on Telegram. The first
+// answer wins, and the other side is brought up to date.
+async function waitForAnswer(id, signal, waitLocally) {
+  const link = relay.relayConfig();
+  if (!link) return waitLocally(signal);
 
   const controller = new AbortController();
   const stopRemote = () => controller.abort();
   signal?.addEventListener("abort", stopRemote);
-  const remote = relay
-    .waitForAnswer(link, id, controller.signal)
+  // An item from before this process started may already be on Telegram.
+  const delivered = deliveries.get(id) ?? Promise.resolve(true);
+  const remote = delivered
+    .then((onTelegram) =>
+      onTelegram ? relay.waitForAnswer(link, id, controller.signal) : new Promise(() => {})
+    )
     .then((answer) => ({ from: "telegram", answer }));
-  const local = waitForItem(id, timeoutSeconds, signal).then((outcome) => ({
+  const local = waitLocally(signal).then((outcome) => ({
     from: "board",
     outcome,
   }));
@@ -243,6 +288,151 @@ async function waitForAnswer(id, timeoutSeconds, signal) {
   return winner.outcome;
 }
 
+// MARK: - At the Mac
+
+// A freshly opened app needs a moment for its first reading.
+async function firstReading(signal) {
+  if (!fs.existsSync(APP_PATH)) return null;
+  const deadline = Date.now() + 5000;
+  const presence = await watchState(
+    () => readPresence() ?? (Date.now() >= deadline ? null : undefined),
+    { signal, deadline }
+  );
+  return presence ?? null;
+}
+
+// The user is back. The board and the chat both close the item, and the app
+// plays its "at the Mac now" banner once.
+function markReady(id) {
+  let closed = false;
+  mutate((s) => {
+    const item = s.items.find((i) => i.id === id);
+    if (!item) return;
+    const now = Date.now() / 1000;
+    if (item.status === "open") {
+      item.status = "done";
+      item.answer = AT_MAC;
+      item.answeredAt = now;
+      item.doneAt = now;
+      closed = true;
+    }
+    item.readyAt = now;
+  });
+  if (closed) closeOnRelay(id, AT_MAC);
+}
+
+// Waits for the user to be at the Mac, not for an answer. A Touch ID or
+// password prompt that nobody sees times out, so the agent holds here while
+// the user is away, and the item reaches Telegram in the meantime.
+async function askAtMac({ text, detail, urgent, source, timeout_seconds }, extra) {
+  const signal = extra?.signal;
+  ensureAppRunning();
+  const presence = readPresence() ?? (await firstReading(signal));
+  const origin = captureOrigin();
+  const startedAt = Date.now() / 1000;
+  const item = {
+    id: randomUUID(),
+    text,
+    detail,
+    status: "open",
+    createdAt: startedAt,
+    // Without the app nobody can tell, so the user says it with a button.
+    choices: presence ? [SKIP] : [READY, SKIP],
+    allowReply: false,
+    urgent: urgent ?? false,
+    source: source ?? origin.project,
+    origin,
+    atMac: true,
+  };
+
+  if (presence?.state === "present") {
+    Object.assign(item, {
+      status: "done",
+      answer: AT_MAC,
+      answeredAt: startedAt,
+      doneAt: startedAt,
+      readyAt: startedAt,
+    });
+    mutate((s) => s.items.push(item));
+    return textResult({
+      ok: true,
+      id: item.id,
+      result: "present",
+      waited_seconds: 0,
+      note: "The user is at the Mac. Start the step now.",
+    });
+  }
+
+  Object.assign(item, { waiting: true, waitingSince: startedAt });
+  mutate((s) => s.items.push(item));
+  const delivery = startDelivery(item);
+  markWaiting(origin);
+  pending.set(item.id, origin);
+
+  const deadline =
+    timeout_seconds > 0 ? Date.now() + timeout_seconds * 1000 : Infinity;
+  const waitLocally = async (localSignal) =>
+    (await watchState(
+      () => {
+        const stored = readState().items.find((i) => i.id === item.id);
+        if (!stored) return { result: "removed" };
+        if (stored.status !== "open") return { result: "done", answer: stored.answer ?? null };
+        if (readPresence()?.state === "present") return { result: "present" };
+        if (Date.now() >= deadline) return { result: "timeout" };
+      },
+      { signal: localSignal, deadline }
+    )) ?? { result: "cancelled" };
+
+  try {
+    const outcome = await waitForAnswer(item.id, signal, waitLocally);
+    const waited = Math.round(Date.now() / 1000 - startedAt);
+
+    if (outcome.result === "cancelled") {
+      dropAbandoned(item.id);
+      return textResult({ ok: false, id: item.id, result: "cancelled" });
+    }
+    if (outcome.result === "present" || outcome.answer === READY) {
+      markReady(item.id);
+      return textResult({
+        ok: true,
+        id: item.id,
+        result: "present",
+        waited_seconds: waited,
+        delivery,
+        note: "The user is at the Mac now. Start the step now.",
+      });
+    }
+    if (outcome.result === "timeout") {
+      dropAbandoned(item.id);
+      return textResult({
+        ok: true,
+        id: item.id,
+        result: "timeout",
+        waited_seconds: waited,
+        note: "The user did not come back to the Mac in time. Do not start the step. Report it as not done.",
+      });
+    }
+    return textResult({
+      ok: true,
+      id: item.id,
+      result: "skipped",
+      answer: outcome.answer ?? null,
+      waited_seconds: waited,
+      note: "The user skipped this step. Do not start it. Report it as not done.",
+    });
+  } finally {
+    pending.delete(item.id);
+    if (signal?.aborted) dropAbandoned(item.id);
+    mutate((s) => {
+      const stored = s.items.find((i) => i.id === item.id);
+      if (stored) stored.waiting = false;
+    });
+    clearWaiting(origin);
+  }
+}
+
+// MARK: - Tools
+
 const server = new McpServer({ name: "objective", version: "1.0.0" });
 
 server.registerTool(
@@ -251,7 +441,8 @@ server.registerTool(
     title: "Add objective",
     description:
       "Ask the user something on their Objective board (a macOS overlay and, " +
-      "if linked, Telegram). Use it ONLY when you are blocked, and only for " +
+      "while the user is away from the Mac, Telegram). Use it ONLY when you " +
+      "are blocked, and only for " +
       "the two kinds of ask that fit in one line: a PERMISSION you lack " +
       "(publish, send, delete, spend), or a FACT only the user holds (which " +
       "name, is it paid). A judgement call about design, architecture, or " +
@@ -264,7 +455,13 @@ server.registerTool(
       "the call to the background after about two minutes and tells you when " +
       "it finishes, so waiting costs you nothing. Do not poll and do not ask " +
       "the user to tell you when they are done. Pass `wait: false` only for a " +
-      "note the user can handle later, when nothing you do next depends on it.",
+      "note the user can handle later, when nothing you do next depends on it. " +
+      "For a step only the user can do AT THE MAC (Touch ID, a sudo or " +
+      "password prompt, a system dialog, a cable), pass `at_mac: true` BEFORE " +
+      "you start that step. The call returns `present` when the user is at " +
+      "the Mac: start the step at once. While the user is away it waits and " +
+      "reaches them on Telegram, so do your other work first. `skipped` or " +
+      "`timeout` means do not start the step.",
     inputSchema: {
       text: z.string().describe("Short objective text shown on the board"),
       detail: z
@@ -302,6 +499,14 @@ server.registerTool(
         .describe(
           "Block until the user answers and return the answer (default true)"
         ),
+      at_mac: z
+        .boolean()
+        .optional()
+        .describe(
+          "The step needs the user physically at the Mac (Touch ID, a password " +
+            "prompt, a dialog). Waits until the user is at the Mac and returns " +
+            "`present`, or `skipped`. Ignores `choices`, `allow_reply`, and `wait`."
+        ),
       timeout_seconds: z
         .number()
         .int()
@@ -316,9 +521,13 @@ server.registerTool(
     },
   },
   async (
-    { text, detail, choices, allow_reply, urgent, source, wait, timeout_seconds },
+    { text, detail, choices, allow_reply, urgent, source, wait, at_mac, timeout_seconds },
     extra
   ) => {
+    if (at_mac) {
+      return askAtMac({ text, detail, urgent, source, timeout_seconds }, extra);
+    }
+
     const origin = captureOrigin();
     const item = {
       id: randomUUID(),
@@ -334,16 +543,7 @@ server.registerTool(
     };
     mutate((s) => s.items.push(item));
     ensureAppRunning();
-
-    const link = relay.relayConfig();
-    let delivery = link ? "board and telegram" : "board";
-    if (link) {
-      try {
-        await relay.pushItem(link, item);
-      } catch (err) {
-        delivery = `board only (telegram failed: ${err.message})`;
-      }
-    }
+    const delivery = startDelivery(item);
 
     if (wait === false) {
       return textResult({ ok: true, item: itemSummary(item), delivery });
@@ -363,7 +563,9 @@ server.registerTool(
 
     const signal = extra?.signal;
     try {
-      const outcome = await waitForAnswer(item.id, timeout_seconds ?? 0, signal);
+      const outcome = await waitForAnswer(item.id, signal, (s) =>
+        waitForItem(item.id, timeout_seconds ?? 0, s)
+      );
       if (outcome.result === "cancelled") {
         dropAbandoned(item.id);
         return textResult({ ok: false, id: item.id, result: "cancelled" });
@@ -378,6 +580,35 @@ server.registerTool(
       });
       clearWaiting(origin);
     }
+  }
+);
+
+server.registerTool(
+  "objective_presence",
+  {
+    title: "User presence",
+    description:
+      "Whether the user is at the Mac now: `present`, `unsure`, or `away`, " +
+      "with the reason and how long it has held. Use it to plan the order of " +
+      "your work. To wait for the user at the Mac, call objective_add with " +
+      "`at_mac: true` instead of polling this.",
+    inputSchema: {},
+  },
+  async () => {
+    const presence = readPresence();
+    if (!presence) {
+      return textResult({
+        state: "unknown",
+        note: "The Objective app does not run, so nobody knows where the user is.",
+      });
+    }
+    return textResult({
+      state: presence.state,
+      reason: presence.reason,
+      for_seconds: Math.max(0, Math.round(Date.now() / 1000 - presence.since)),
+      locked: presence.locked,
+      chosen_in_menu: presence.override ?? null,
+    });
   }
 );
 
@@ -503,7 +734,9 @@ server.registerTool(
     },
   },
   async ({ id, timeout_seconds }, extra) =>
-    textResult(await waitForAnswer(id, timeout_seconds ?? 0, extra?.signal))
+    textResult(
+      await waitForAnswer(id, extra?.signal, (s) => waitForItem(id, timeout_seconds ?? 0, s))
+    )
 );
 
 await server.connect(new StdioServerTransport());

@@ -125,6 +125,7 @@ const server = spawn(process.execPath, [path.join(here, "index.js")], {
     OBJECTIVE_APP: path.join(stateDir, "no-such-app"),
     OBJECTIVE_RELAY_URL: relayUrl,
     OBJECTIVE_RELAY_KEY: paired.account_key,
+    OBJECTIVE_PRESENCE_CHECK_SECONDS: "1",
   },
   stdio: ["pipe", "pipe", process.env.VERBOSE ? "inherit" : "ignore"],
 });
@@ -153,6 +154,56 @@ const send = (method, params) => {
 const call = (name, args) => send("tools/call", { name, arguments: args });
 const payload = (response) => JSON.parse(response.result.content[0].text);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const readBoard = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
+const messagesAbout = (text) =>
+  telegramCalls.filter((c) => c.method === "sendMessage" && c.body.text?.includes(text));
+const editsAbout = (text) =>
+  telegramCalls.filter((c) => c.method === "editMessageText" && c.body.text?.includes(text));
+
+async function eventually(find, ms = 5000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const value = find();
+    if (value) return value;
+    if (Date.now() > end) return null;
+    await sleep(50);
+  }
+}
+
+// Stands in for the app's reading. The test process is alive, so the reading
+// counts as live.
+function setPresence(state) {
+  const file = path.join(stateDir, "presence.json");
+  fs.writeFileSync(
+    `${file}.tmp-test`,
+    JSON.stringify({ state, reason: "test", since: Date.now() / 1000, locked: false, realInput: true, pid: process.pid })
+  );
+  fs.renameSync(`${file}.tmp-test`, file);
+}
+
+const openItem = (text) =>
+  eventually(() => readBoard().items.find((i) => i.text === text && i.status === "open"));
+
+function answerOnBoard(id, answer) {
+  const board = readBoard();
+  const item = board.items.find((i) => i.id === id);
+  item.status = "done";
+  item.answer = answer;
+  item.doneAt = Date.now() / 1000;
+  board.rev += 1;
+  fs.writeFileSync(`${stateFile}.tmp-test`, JSON.stringify(board));
+  fs.renameSync(`${stateFile}.tmp-test`, stateFile);
+}
+
+const tapButton = (message, index) =>
+  hook({
+    callback_query: {
+      id: `q-${Date.now()}`,
+      data: message.body.reply_markup.inline_keyboard.flat()[index].callback_data,
+      message: { message_id: 1, chat: { id: CHAT } },
+    },
+  });
 
 let failure = null;
 try {
@@ -224,6 +275,68 @@ try {
   const edit = telegramCalls.findLast((c) => c.method === "editMessageText");
   assert.match(edit.body.text, /✅ <s>Check the logs<\/s>/);
   assert.match(edit.body.text, /💬 <b>logs are clean<\/b>/);
+
+  // 5. A user at the Mac gets no push. Leaving sends the open item to Telegram.
+  setPresence("present");
+  const leaving = call("objective_add", { text: "Rotate the API key", choices: ["Rotate", "Keep"] });
+  await openItem("Rotate the API key");
+  await sleep(1500);
+  assert.equal(messagesAbout("Rotate the API key").length, 0, "a user at the Mac got a Telegram message");
+  setPresence("away");
+  const rotate = await eventually(() => messagesAbout("Rotate the API key")[0]);
+  assert.ok(rotate, "leaving the Mac did not send the open item to Telegram");
+  await tapButton(rotate, 0);
+  assert.equal(payload(await leaving).answer, "Rotate");
+
+  // 6. An unsure user who reacts to the banner in time gets no push.
+  setPresence("unsure");
+  const noticed = call("objective_add", { text: "Pick the icon", choices: ["Round", "Square"] });
+  const icon = await openItem("Pick the icon");
+  await sleep(300);
+  setPresence("present");
+  await sleep(1500);
+  assert.equal(messagesAbout("Pick the icon").length, 0, "a user who reacted in time got a Telegram message");
+  answerOnBoard(icon.id, "Round");
+  assert.equal(payload(await noticed).answer, "Round");
+
+  // 7. An unsure user who lets the banner pass gets the push after the check.
+  setPresence("unsure");
+  const missed = call("objective_add", { text: "Approve the invoice", choices: ["Approve", "Reject"] });
+  const invoice = await openItem("Approve the invoice");
+  await sleep(300);
+  assert.equal(messagesAbout("Approve the invoice").length, 0, "the push came before the check ended");
+  assert.ok(await eventually(() => messagesAbout("Approve the invoice")[0]), "no push after the check");
+  answerOnBoard(invoice.id, "Approve");
+  assert.equal(payload(await missed).answer, "Approve");
+  assert.ok(await eventually(() => editsAbout("Approve the invoice")[0]), "the chat message stayed open");
+
+  // 8. A step at the Mac waits while the user is away, and goes on when the user is back.
+  setPresence("away");
+  const touch = call("objective_add", { text: "Touch ID for brew upgrade", at_mac: true });
+  const touchMessage = await eventually(() => messagesAbout("Touch ID for brew upgrade")[0]);
+  assert.ok(touchMessage, "an away user got no Telegram message for a step at the Mac");
+  assert.match(touchMessage.body.text, /Waits for you at the Mac/);
+  assert.deepEqual(touchMessage.body.reply_markup.inline_keyboard.flat().map((b) => b.text), ["Skip"]);
+  let touchSettled = false;
+  touch.then(() => (touchSettled = true));
+  await sleep(300);
+  assert.equal(touchSettled, false, "at_mac returned while the user was away");
+  setPresence("present");
+  const touched = payload(await touch);
+  assert.equal(touched.result, "present");
+  assert.ok(
+    await eventually(() => editsAbout("Touch ID for brew upgrade").find((c) => c.body.text.includes("At the Mac"))),
+    "the chat message did not say that the user is back"
+  );
+
+  // 9. Skip from the phone means the agent must not start the step.
+  setPresence("away");
+  const sudo = call("objective_add", { text: "Enter the sudo password", at_mac: true });
+  const sudoMessage = await eventually(() => messagesAbout("Enter the sudo password")[0]);
+  await tapButton(sudoMessage, 0);
+  const skipped = payload(await sudo);
+  assert.equal(skipped.result, "skipped");
+  assert.equal(skipped.answer, "Skip");
 
   console.log("all relay end-to-end tests passed");
 } catch (err) {

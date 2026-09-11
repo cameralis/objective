@@ -293,6 +293,15 @@ private struct ItemRow: View {
             Label("the agent is gone", systemImage: "moon.zzz")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.tertiary)
+        } else if item.isAtMac {
+            TimelineView(.periodic(from: .now, by: 15)) { _ in
+                Label(
+                    item.blockedFor.map { "needs you at the Mac · \(Self.duration($0))" } ?? "needs you at the Mac",
+                    systemImage: "desktopcomputer"
+                )
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(accent)
+            }
         } else if item.isBlocking {
             TimelineView(.periodic(from: .now, by: 15)) { _ in
                 Label(

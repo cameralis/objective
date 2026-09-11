@@ -28,9 +28,15 @@ struct ObjectiveItem: Codable, Identifiable, Equatable {
     var origin: ItemOrigin?
     var waiting: Bool?
     var waitingSince: Double?
+    // Waits for you to be at the Mac, not for an answer: Touch ID, a password,
+    // a system dialog.
+    var atMac: Bool?
+    // When you came back to the Mac for it, so the app says so once.
+    var readyAt: Double?
 
     var isOpen: Bool { status == "open" }
     var isUrgent: Bool { urgent ?? false }
+    var isAtMac: Bool { atMac ?? false }
     // An agent that sits inside the tool call is stalled until this is answered.
     var isBlocking: Bool { isOpen && (waiting ?? false) }
 

@@ -11,6 +11,8 @@ final class Store: ObservableObject {
     @Published private(set) var newIDs: Set<String> = []
 
     private var knownIDs: Set<String> = []
+    private var readyIDs: Set<String> = []
+    private var announcedAt: [String: Date] = [:]
     private var firstLoadDone = false
     private var dirWatcher: DispatchSourceFileSystemObject?
     private var dirFD: CInt = -1
@@ -136,12 +138,15 @@ final class Store: ObservableObject {
         }
 
         let fresh = pruned.items.filter { $0.isOpen && !knownIDs.contains($0.id) }
+        let ready = pruned.items.filter { $0.isAtMac && $0.readyAt != nil && !readyIDs.contains($0.id) }
         for item in pruned.items { knownIDs.insert(item.id) }
+        for item in ready { readyIDs.insert(item.id) }
 
         items = pruned.items
 
-        if firstLoadDone, !fresh.isEmpty {
-            announce(fresh)
+        if firstLoadDone {
+            if !fresh.isEmpty { announce(fresh) }
+            if !ready.isEmpty { announceReady(ready) }
         }
         firstLoadDone = true
 
@@ -153,8 +158,37 @@ final class Store: ObservableObject {
         }
     }
 
+    // You are back at the Mac, and the agent starts its step now. A banner that
+    // played for the same item a moment ago already told you, so it stays quiet.
+    private func announceReady(_ ready: [ObjectiveItem]) {
+        let now = Date()
+        let unheard = ready.filter { item in
+            guard let heard = announcedAt[item.id] else { return true }
+            return now.timeIntervalSince(heard) > 60
+        }
+        guard !unheard.isEmpty else { return }
+
+        NSSound(named: "Hero")?.play()
+        AppDelegate.shared?.showPanel()
+
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let center = UNUserNotificationCenter.current()
+        for item in unheard {
+            let content = UNMutableNotificationContent()
+            content.title = "Needs you at the Mac now"
+            if let source = item.source, !source.isEmpty {
+                content.subtitle = source
+            }
+            content.body = item.text
+            center.add(UNNotificationRequest(identifier: "\(item.id)-ready", content: content, trigger: nil))
+        }
+    }
+
     private func announce(_ fresh: [ObjectiveItem]) {
-        for item in fresh { newIDs.insert(item.id) }
+        for item in fresh {
+            newIDs.insert(item.id)
+            announcedAt[item.id] = Date()
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             for item in fresh { self?.newIDs.remove(item.id) }
         }
