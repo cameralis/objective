@@ -23,9 +23,9 @@ on your Mac for it.
 ## Parts
 
 - `app/` — native SwiftUI app. A borderless, non-activating glass panel that floats above all windows and spaces. A `scope` icon in the menu bar controls it.
-- `mcp/` — MCP server (Node, stdio). Tools: `objective_add`, `objective_list`, `objective_complete`, `objective_remove`, `objective_clear`, `objective_wait`.
+- `mcp/` — MCP server (Node, stdio). Tools: `objective_add`, `objective_presence`, `objective_list`, `objective_complete`, `objective_remove`, `objective_clear`, `objective_wait`.
 - `relay/` — the Telegram side: one shared bot on a Cloudflare Worker, paired with a code. See `relay/README.md`.
-- Shared state: `~/Library/Application Support/Objective/state.json`. Every part watches the file, so updates are immediate and bidirectional. You can run the overlay, the bot, or both.
+- Shared state: `~/Library/Application Support/Objective/state.json`, and the app's presence reading next to it in `presence.json`. Every part watches the folder, so updates are immediate and bidirectional. You can run the overlay, the bot, or both.
 
 ## Build and install
 
@@ -39,6 +39,10 @@ Register the MCP server with Claude Code:
 ```sh
 claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
 ```
+
+Codex uses the same server. The **Objective Enabled** setting adds it to `~/.codex/config.toml`
+with a seven-day tool timeout, so a waiting call is never stopped, and adds the instructions to
+`~/.codex/AGENTS.md`.
 
 ## The overlay
 
@@ -55,9 +59,10 @@ claude mcp add -s user objective -- node "$(pwd)/mcp/index.js"
   contract it.
 - Drag the panel anywhere; the position is remembered, and the badge keeps the same corner.
 - The menu bar has an **Objective Enabled** setting. Turning it off removes the global
-  Objective instructions and prompt hook, disables the user-scoped MCP server, and hides
-  the overlay. Turning it on restores the saved setup. Start a new Claude Code session after
-  changing it because an open session keeps the tools and instructions it started with.
+  Objective instructions and prompt hook, disables the user-scoped MCP server in Claude Code
+  and Codex, and hides the overlay. Turning it on restores the saved setup. Start a new
+  session after changing it because an open session keeps the tools and instructions it
+  started with.
 - Done items are pruned from the state file after one day.
 
 ### How the jump works
@@ -91,6 +96,55 @@ tccutil reset Accessibility io.github.cameralis.objective
 Each jump writes one line to `~/Library/Application Support/Objective/focus.log`, which says
 what was searched and what was raised.
 
+## Presence
+
+Telegram is the push notification for when you are away, so Objective must know whether you
+sit at the Mac. The app reads it from what you do, and writes one reading to `presence.json`.
+
+| Signal | What it reads |
+| --- | --- |
+| Real input | Keys, clicks, mouse moves, and scrolls. An event counts only when the system or a mouse driver (Logi Options+) sent it, so fake input from computer use never counts as you. The app keeps the time of the last event, never the keys. |
+| Screen lock | A lock cancels the input before it. An unlock counts as you. |
+| Lid | Closed with no external display means away. |
+| iPhone | Out of Bluetooth range for three minutes means away. In range proves nothing. |
+| Call | An app that records from the microphone keeps you present. Objective never opens the microphone. |
+
+| State | When |
+| --- | --- |
+| `present` | Real input in the last 90 seconds, or a call, while the screen is unlocked |
+| `away` | Lid closed with no display, iPhone gone for three minutes, or no input for 15 minutes |
+| `unsure` | Anything else, such as a few quiet minutes or a fresh lock |
+
+How a new item reaches you:
+
+- **present**: the overlay, a sound, and a banner. No Telegram.
+- **unsure**: the same banner, then a 60 second check. Real input or an unlock in that time
+  means you saw it. Silence sends the item to Telegram.
+- **away**: Telegram at once.
+- If you leave while an item is open, it goes to Telegram then.
+- If the app does not run, every item goes to Telegram, because nobody can tell.
+
+The menu bar shows the reading and lets you correct it: **Here for 1 Hour** (a lock ends it),
+**Away Until I Return** (your next input after one minute ends it), and **Detect Automatically**.
+
+Real input needs **Input Monitoring**, which macOS asks for once, in Privacy & Security >
+Input Monitoring. Without it the app falls back to the system idle timer, where fake input
+counts as you, and the menu shows **Allow Input Monitoring…**.
+
+### Steps at the Mac
+
+Touch ID, a sudo prompt, or a system dialog times out when nobody sees it. So an agent calls
+`objective_add` with `at_mac: true` before it starts such a step:
+
+- You are at the Mac: the call returns `present` at once, a banner says what is coming, and
+  the agent starts the step.
+- You are away: the item goes on the board and to Telegram, and the call waits. When you come
+  back, a sound and a banner say so, the Telegram message closes, and the call returns `present`.
+- **Skip**, on the board or in Telegram, returns `skipped`, and the agent leaves the step undone.
+- Without the app, the item asks you with **Ready** and **Skip**.
+
+`objective_presence` returns the current reading, so an agent can plan its work around it.
+
 ## The shared bot (recommended)
 
 One bot serves everybody, so a user never creates a bot. Deploy the Worker once, then:
@@ -100,9 +154,9 @@ One bot serves everybody, so a user never creates a bot. Deploy the Worker once,
 make relay-pair CODE=XXXXXXXX URL=https://objective-relay.<you>.workers.dev
 ```
 
-After that the MCP server posts every item to the relay and waits on the overlay
-and on Telegram at the same time. The first answer wins. Deployment steps are in
-`relay/README.md`.
+After that an item goes to the relay when you are away from the Mac (see Presence), and the
+MCP server waits on the overlay and on Telegram at the same time. The first answer wins.
+Deployment steps are in `relay/README.md`.
 
 ### In the chat
 
@@ -129,6 +183,7 @@ the one thing the overlay does and the chat cannot.
 | `urgent` | Red styling, stronger sound, sorts to the top. |
 | `source` | Project or repo label. |
 | `wait` | Block until you answer (default `true`). |
+| `at_mac` | Wait until you are at the Mac, for Touch ID, a password, or a dialog. Returns `present` or `skipped`. |
 
 `objective_add` blocks by default and returns your answer as the result of the tool call.
 The agent is held inside that call, so your click reaches it in milliseconds, with no polling
