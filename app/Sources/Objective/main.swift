@@ -67,6 +67,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var enabledMenuItem: NSMenuItem!
     private var overlayMenuItem: NSMenuItem!
     private var disabledBadge: StatusBadgeImageView!
+    private var presenceMenuItem: NSMenuItem!
+    private var hereMenuItem: NSMenuItem!
+    private var awayMenuItem: NSMenuItem!
+    private var automaticMenuItem: NSMenuItem!
+    private var inputMonitoringMenuItem: NSMenuItem!
     private let objectiveConfiguration = ObjectiveConfiguration()
 
     private let originKey = "panelOrigin"
@@ -85,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setUpStatusItem()
         requestNotificationPermission()
         Store.shared.start()
+        Presence.shared.start()
         try? objectiveConfiguration.captureCurrentConfiguration()
         fitPanel()
         if objectiveConfiguration.isEnabled {
@@ -224,6 +230,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+
+        // Agents use this to choose between the overlay and Telegram, so the
+        // reading and the way to correct it sit at the top.
+        menu.addItem(.sectionHeader(title: "Presence"))
+        presenceMenuItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
+        hereMenuItem = menu.addItem(withTitle: "Here for 1 Hour", action: #selector(chooseHere), keyEquivalent: "")
+        awayMenuItem = menu.addItem(withTitle: "Away Until I Return", action: #selector(chooseAway), keyEquivalent: "")
+        automaticMenuItem = menu.addItem(withTitle: "Detect Automatically", action: #selector(chooseAutomatic), keyEquivalent: "")
+        inputMonitoringMenuItem = menu.addItem(withTitle: "Allow Input Monitoring…", action: #selector(openInputMonitoring), keyEquivalent: "")
+        inputMonitoringMenuItem.toolTip = "Without it, fake input from computer use counts as you"
+        for item in [hereMenuItem, awayMenuItem, automaticMenuItem, inputMonitoringMenuItem] {
+            item?.target = self
+        }
+        menu.addItem(.separator())
+
         enabledMenuItem = menu.addItem(
             withTitle: "Objective Enabled",
             action: #selector(toggleObjectiveFromMenu),
@@ -277,6 +298,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         togglePanel()
     }
 
+    @objc private func chooseHere() { Presence.shared.choose(.here) }
+    @objc private func chooseAway() { Presence.shared.choose(.away) }
+    @objc private func chooseAutomatic() { Presence.shared.choose(nil) }
+    @objc private func openInputMonitoring() { Presence.shared.openInputMonitoringSettings() }
+
+    private func updatePresenceMenu() {
+        let presence = Presence.shared
+        let name: String
+        switch presence.reading.state {
+        case .present: name = "At the Mac"
+        case .unsure: name = "Maybe at the Mac"
+        case .away: name = "Away"
+        }
+        var detail = presence.reading.reason
+        if let last = presence.lastInput {
+            detail += ", last input \(Self.ago(Date().timeIntervalSince1970 - last))"
+        }
+        presenceMenuItem.title = "\(name): \(detail)"
+        hereMenuItem.state = presence.override?.kind == .here ? .on : .off
+        awayMenuItem.state = presence.override?.kind == .away ? .on : .off
+        automaticMenuItem.state = presence.override == nil ? .on : .off
+        inputMonitoringMenuItem.isHidden = presence.seesRealInput
+    }
+
+    private static func ago(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(max(Int(seconds), 0)) s ago" }
+        if seconds < 3600 { return "\(Int(seconds / 60)) min ago" }
+        return "\(Int(seconds / 3600)) h ago"
+    }
+
     @objc private func toggleObjectiveFromMenu() {
         let enable = !objectiveConfiguration.isEnabled
         do {
@@ -316,6 +367,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 extension AppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
+        Presence.shared.refresh()
+        updatePresenceMenu()
         updateStatusMenu()
     }
 }
