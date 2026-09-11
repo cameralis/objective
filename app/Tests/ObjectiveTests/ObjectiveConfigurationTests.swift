@@ -59,6 +59,38 @@ struct ObjectiveConfigurationTests {
             """,
             to: fixture.paths.claudeSettings
         )
+        try fixture.write(
+            """
+            model = "gpt"
+
+            [mcp_servers.other]
+            command = "other-server"
+
+            [mcp_servers.objective]
+            command = "node"
+            args = ["/somewhere/objective/mcp/index.js"]
+            tool_timeout_sec = 604800
+
+            [mcp_servers.objective.env]
+            KEEP = "me"
+
+            [projects."/Users/somebody/repo"]
+            trust_level = "trusted"
+            """,
+            to: fixture.paths.codexConfiguration
+        )
+        try fixture.write(
+            """
+            # Codex rules
+
+            - Keep this.
+
+            # Objective overlay board
+
+            - Use `objective_add` when blocked.
+            """,
+            to: fixture.paths.codexInstructions
+        )
 
         let configuration = ObjectiveConfiguration(paths: fixture.paths)
         #expect(configuration.isEnabled)
@@ -85,6 +117,14 @@ struct ObjectiveConfigurationTests {
         #expect(disabledSettingsText.contains("other-hook.mjs"))
         #expect(disabledSettingsText.contains("keep-me"))
 
+        let disabledCodex = try String(contentsOf: fixture.paths.codexConfiguration, encoding: .utf8)
+        #expect(!disabledCodex.contains("mcp_servers.objective"))
+        #expect(disabledCodex.contains("[mcp_servers.other]"))
+        #expect(disabledCodex.contains("[projects.\"/Users/somebody/repo\"]\ntrust_level = \"trusted\""))
+        let disabledCodexInstructions = try String(contentsOf: fixture.paths.codexInstructions, encoding: .utf8)
+        #expect(!disabledCodexInstructions.contains("# Objective overlay board"))
+        #expect(disabledCodexInstructions.contains("# Codex rules"))
+
         let relaunchedConfiguration = ObjectiveConfiguration(paths: fixture.paths)
         try relaunchedConfiguration.setEnabled(true)
         #expect(relaunchedConfiguration.isEnabled)
@@ -98,10 +138,70 @@ struct ObjectiveConfigurationTests {
         let enabledInstructions = try String(contentsOf: fixture.paths.claudeInstructions, encoding: .utf8)
         #expect(enabledInstructions.contains("- Use `objective_add` when blocked."))
         #expect(enabledInstructions.components(separatedBy: "# Objective overlay board").count == 2)
+        #expect(enabledInstructions.contains("`at_mac: true`"))
+        #expect(enabledInstructions.contains("- Keep this.\n\n# Git commits"))
 
         let enabledSettingsText = try String(contentsOf: fixture.paths.claudeSettings, encoding: .utf8)
         #expect(enabledSettingsText.components(separatedBy: "open-objectives-hook.mjs").count == 2)
         #expect(enabledSettingsText.contains("other-hook.mjs"))
+
+        // The exact block the user had comes back, not a generated one.
+        let enabledCodex = try String(contentsOf: fixture.paths.codexConfiguration, encoding: .utf8)
+        #expect(enabledCodex.components(separatedBy: "[mcp_servers.objective]").count == 2)
+        #expect(enabledCodex.contains("[mcp_servers.objective.env]\nKEEP = \"me\""))
+        #expect(enabledCodex.contains("[mcp_servers.other]"))
+        let enabledCodexInstructions = try String(contentsOf: fixture.paths.codexInstructions, encoding: .utf8)
+        #expect(enabledCodexInstructions.components(separatedBy: "# Objective overlay board").count == 2)
+        #expect(enabledCodexInstructions.contains("# Codex rules"))
+    }
+
+    @Test func enableSetsUpCodexFromTheClaudeServer() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+
+        try fixture.write(
+            """
+            { "mcpServers": { "objective": { "command": "node", "args": ["/somewhere/objective/mcp/index.js"] } } }
+            """,
+            to: fixture.paths.claudeConfiguration
+        )
+        try fixture.write("# Objective overlay board\n\n- Use `objective_add` when blocked.\n", to: fixture.paths.claudeInstructions)
+        try fixture.write("model = \"gpt\"\n", to: fixture.paths.codexConfiguration)
+
+        let configuration = ObjectiveConfiguration(paths: fixture.paths)
+        try configuration.setEnabled(false)
+        try configuration.setEnabled(true)
+
+        let codex = try String(contentsOf: fixture.paths.codexConfiguration, encoding: .utf8)
+        #expect(codex.hasPrefix("model = \"gpt\"\n\n[mcp_servers.objective]\n"))
+        #expect(codex.contains("command = \"node\"\nargs = [\"/somewhere/objective/mcp/index.js\"]"))
+        #expect(codex.contains("tool_timeout_sec = 604800"))
+        #expect(codex.contains("default_tools_approval_mode = \"approve\""))
+
+        let codexInstructions = try String(contentsOf: fixture.paths.codexInstructions, encoding: .utf8)
+        #expect(codexInstructions.hasPrefix("# Objective overlay board"))
+        #expect(codexInstructions.contains("`objective_presence`"))
+    }
+
+    @Test func enableLeavesAMacWithoutCodexAlone() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+
+        try fixture.write(
+            """
+            { "mcpServers": { "objective": { "command": "node", "args": ["/somewhere/objective/mcp/index.js"] } } }
+            """,
+            to: fixture.paths.claudeConfiguration
+        )
+        try fixture.write("# Objective overlay board\n\n- Use `objective_add` when blocked.\n", to: fixture.paths.claudeInstructions)
+
+        let configuration = ObjectiveConfiguration(paths: fixture.paths)
+        try configuration.setEnabled(false)
+        try configuration.setEnabled(true)
+
+        #expect(configuration.isEnabled)
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.codexConfiguration.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.paths.codexInstructions.path))
     }
 
     @Test func enableNeedsASavedServer() throws {
@@ -126,6 +226,8 @@ private final class Fixture {
             claudeConfiguration: root.appendingPathComponent(".claude.json"),
             claudeInstructions: root.appendingPathComponent(".claude/CLAUDE.md"),
             claudeSettings: root.appendingPathComponent(".claude/settings.json"),
+            codexConfiguration: root.appendingPathComponent(".codex/config.toml"),
+            codexInstructions: root.appendingPathComponent(".codex/AGENTS.md"),
             backup: root.appendingPathComponent("Objective/configuration-backup.json")
         )
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

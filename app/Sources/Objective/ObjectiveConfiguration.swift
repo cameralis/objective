@@ -4,6 +4,8 @@ struct ObjectiveConfigurationPaths {
     let claudeConfiguration: URL
     let claudeInstructions: URL
     let claudeSettings: URL
+    let codexConfiguration: URL
+    let codexInstructions: URL
     let backup: URL
 
     static func live(fileManager: FileManager = .default) -> Self {
@@ -12,6 +14,8 @@ struct ObjectiveConfigurationPaths {
             claudeConfiguration: home.appendingPathComponent(".claude.json"),
             claudeInstructions: home.appendingPathComponent(".claude/CLAUDE.md"),
             claudeSettings: home.appendingPathComponent(".claude/settings.json"),
+            codexConfiguration: home.appendingPathComponent(".codex/config.toml"),
+            codexInstructions: home.appendingPathComponent(".codex/AGENTS.md"),
             backup: StatePaths.directory.appendingPathComponent("configuration-backup.json")
         )
     }
@@ -21,6 +25,7 @@ private struct ObjectiveConfigurationBackup: Codable {
     var server: Data?
     var instructions: String?
     var promptHookGroups: [Data] = []
+    var codexServer: String?
 }
 
 enum ObjectiveConfigurationError: LocalizedError {
@@ -37,11 +42,21 @@ enum ObjectiveConfigurationError: LocalizedError {
     }
 }
 
-/// Owns the files that make Objective available to Claude Code. The app keeps
-/// an exact copy of every removed value, so turning Objective back on does not
-/// guess at command paths or overwrite unrelated settings.
+/// Owns the files that make Objective available to Claude Code and Codex. The
+/// app keeps an exact copy of every removed value, so turning Objective back on
+/// does not guess at command paths or overwrite unrelated settings.
 final class ObjectiveConfiguration {
     private static let instructionHeading = "# Objective overlay board"
+    private static let codexTable = "mcp_servers.objective"
+    // Older saved instructions predate the presence rules. They get the rules
+    // added, and keep everything else as the user left it.
+    private static let presenceMarker = "at_mac"
+    private static let presenceInstructions = """
+    - **When a step needs me at the Mac** (Touch ID, a sudo or password prompt, a system dialog, a cable), call `objective_add` with `at_mac: true` and a short `text` such as "Touch ID for brew upgrade" BEFORE you start that step. Never start a prompt that I may not be there to see.
+    - It returns `present` when I am at the Mac: start the step at once. While I am away it waits, and I get the ask on Telegram. Do all your other work first, so only that step waits.
+    - `skipped` or `timeout` means do not start the step. Report it as not done.
+    - `objective_presence` says whether I am at the Mac now (`present`, `unsure`, `away`). Use it to plan the order of your work. Never ask me in chat whether I am here.
+    """
     private static let defaultInstructions = """
     # Objective overlay board
 
@@ -57,6 +72,7 @@ final class ObjectiveConfiguration {
     - **Only two kinds of ask belong on the board.** A permission ("push this public?", "send this?", "delete this?"), or a fact only I hold ("which name?", "is it paid?"). Both fit in one line.
     - **A judgement call never goes on the board.** Architecture, tradeoffs, and taste need your reasoning and the code. Ask those in the session, in chat.
     - Never end a turn with an open question that lives only in the chat. If you are blocked, it belongs on the board, and it waits with no deadline.
+    \(presenceInstructions)
     """
 
     private let paths: ObjectiveConfigurationPaths
@@ -88,8 +104,11 @@ final class ObjectiveConfiguration {
                 try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys])
             }
         }
+        if let codexServer = splitCodexServer(from: readText(paths.codexConfiguration) ?? "").server {
+            backup.codexServer = codexServer
+        }
 
-        if backup.server != nil || backup.instructions != nil || !backup.promptHookGroups.isEmpty {
+        if backup.server != nil || backup.instructions != nil || !backup.promptHookGroups.isEmpty || backup.codexServer != nil {
             try writeBackup(backup)
         }
     }
@@ -114,12 +133,10 @@ final class ObjectiveConfiguration {
         servers["objective"] = server
         claude["mcpServers"] = servers
 
+        let section = withPresenceRules(backup.instructions ?? Self.defaultInstructions)
         var instructions = readText(paths.claudeInstructions) ?? ""
         if instructionSection(in: instructions) == nil {
-            instructions = appendingSection(
-                backup.instructions ?? Self.defaultInstructions,
-                to: instructions
-            )
+            instructions = appendingSection(section, to: instructions)
         }
 
         var changes: [(URL, Data)] = [
@@ -140,6 +157,18 @@ final class ObjectiveConfiguration {
                 settings["hooks"] = hooks
             }
             changes.append((paths.claudeSettings, try jsonData(settings)))
+        }
+
+        if hasCodex {
+            let codexText = readText(paths.codexConfiguration) ?? ""
+            if splitCodexServer(from: codexText).server == nil {
+                let block = backup.codexServer ?? codexServerBlock(for: server)
+                changes.append((paths.codexConfiguration, Data(appendingSection(block, to: codexText).utf8)))
+            }
+            let codexInstructions = readText(paths.codexInstructions) ?? ""
+            if instructionSection(in: codexInstructions) == nil {
+                changes.append((paths.codexInstructions, Data(appendingSection(section, to: codexInstructions).utf8)))
+            }
         }
 
         try writeChanges(changes)
@@ -166,6 +195,17 @@ final class ObjectiveConfiguration {
             }
         }
 
+        if let codexText = readText(paths.codexConfiguration) {
+            let split = splitCodexServer(from: codexText)
+            if split.server != nil {
+                let rest = split.rest.trimmingCharacters(in: .newlines)
+                changes.append((paths.codexConfiguration, Data((rest.isEmpty ? "" : rest + "\n").utf8)))
+            }
+        }
+        if let codexInstructions = readText(paths.codexInstructions), instructionSection(in: codexInstructions) != nil {
+            changes.append((paths.codexInstructions, Data(removingInstructionSection(from: codexInstructions).utf8)))
+        }
+
         try writeChanges(changes)
     }
 
@@ -182,7 +222,81 @@ final class ObjectiveConfiguration {
         return servers?["objective"] as? [String: Any]
     }
 
+    // MARK: - Codex configuration
+
+    // Codex is optional. Without its folder there is nothing to set up.
+    private var hasCodex: Bool {
+        fileManager.fileExists(atPath: paths.codexConfiguration.deletingLastPathComponent().path)
+    }
+
+    // The same server Claude Code runs. objective_add waits for the user with
+    // no deadline, so Codex must not stop the call, and must not ask before
+    // each board call.
+    private func codexServerBlock(for server: [String: Any]) -> String {
+        let command = server["command"] as? String ?? "node"
+        let args = (server["args"] as? [String] ?? []).map(Self.tomlString).joined(separator: ", ")
+        var lines = [
+            "[\(Self.codexTable)]",
+            "command = \(Self.tomlString(command))",
+            "args = [\(args)]",
+            "tool_timeout_sec = 604800",
+            "default_tools_approval_mode = \"approve\"",
+        ]
+        let env = server["env"] as? [String: String] ?? [:]
+        if !env.isEmpty {
+            lines.append("")
+            lines.append("[\(Self.codexTable).env]")
+            for key in env.keys.sorted() {
+                lines.append("\(Self.tomlString(key)) = \(Self.tomlString(env[key] ?? ""))")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    // Separates the Objective server tables from the rest of config.toml, line
+    // by line, so every other setting stays exactly as it was.
+    private func splitCodexServer(from text: String) -> (rest: String, server: String?) {
+        var rest: [Substring] = []
+        var server: [Substring] = []
+        var inServer = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if let name = tableName(of: line) {
+                inServer = name == Self.codexTable || name.hasPrefix(Self.codexTable + ".")
+            }
+            if inServer {
+                server.append(line)
+            } else {
+                rest.append(line)
+            }
+        }
+        let block = server.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (rest.joined(separator: "\n"), block.isEmpty ? nil : block)
+    }
+
+    // The name of a table header such as [mcp_servers.objective], or nil for
+    // any other line. A comma means an array value, not a header.
+    private func tableName(of line: Substring) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("["), let close = trimmed.lastIndex(of: "]") else { return nil }
+        let after = trimmed[trimmed.index(after: close)...].trimmingCharacters(in: .whitespaces)
+        guard after.isEmpty || after.hasPrefix("#") else { return nil }
+        let name = trimmed[..<close].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return name.contains(",") ? nil : name
+    }
+
+    private static func tomlString(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
     // MARK: - Instructions
+
+    private func withPresenceRules(_ section: String) -> String {
+        guard !section.contains(Self.presenceMarker) else { return section }
+        return section.trimmingCharacters(in: .newlines) + "\n" + Self.presenceInstructions
+    }
 
     private func instructionSection(in text: String) -> (range: Range<String.Index>, text: String)? {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
