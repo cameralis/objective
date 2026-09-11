@@ -43,15 +43,6 @@ struct PresenceReading: Equatable {
     var reason: String
 }
 
-// A state that has ended, so the menu can show what the app saw while you
-// were gone. Opening the menu is itself input, so the current state alone
-// always says you are here.
-struct PresenceSpan {
-    var state: PresenceState
-    var reason: String
-    var duration: TimeInterval
-}
-
 enum PresenceRules {
     // Input this recent means you are at the Mac.
     static let presentWindow: TimeInterval = 90
@@ -112,8 +103,7 @@ final class Presence {
     private static let anyInput = CGEventType(rawValue: ~0)!
 
     private(set) var reading = PresenceReading(state: .unsure, reason: "starting")
-    private(set) var since = Date().timeIntervalSince1970
-    private(set) var previous: PresenceSpan?
+    private(set) var lastInput: Double?
     private(set) var override: PresenceOverride? {
         didSet { saveOverride() }
     }
@@ -122,8 +112,7 @@ final class Presence {
     // fake input from computer use moves that timer too.
     var seesRealInput: Bool { tap != nil }
 
-    private var started = false
-    private var lastInput: Double?
+    private var since = Date().timeIntervalSince1970
     private var locked = false
     private var phoneSeen = false
     private var phoneMissingSince: Double?
@@ -195,13 +184,7 @@ final class Presence {
             callActive: Self.callActive(),
             override: override
         ))
-        if next.state != reading.state {
-            if started {
-                previous = PresenceSpan(state: reading.state, reason: reading.reason, duration: now - since)
-            }
-            since = now
-        }
-        started = true
+        if next.state != reading.state { since = now }
         reading = next
         write()
     }

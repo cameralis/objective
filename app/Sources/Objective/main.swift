@@ -68,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var overlayMenuItem: NSMenuItem!
     private var disabledBadge: StatusBadgeImageView!
     private var presenceMenuItem: NSMenuItem!
-    private var previousPresenceMenuItem: NSMenuItem!
+    private var presenceMenuTimer: Timer?
     private var hereMenuItem: NSMenuItem!
     private var awayMenuItem: NSMenuItem!
     private var automaticMenuItem: NSMenuItem!
@@ -236,8 +236,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // reading and the way to correct it sit at the top.
         menu.addItem(.sectionHeader(title: "Presence"))
         presenceMenuItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
-        previousPresenceMenuItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
-        previousPresenceMenuItem.isHidden = true
         hereMenuItem = menu.addItem(withTitle: "Here for 1 Hour", action: #selector(chooseHere), keyEquivalent: "")
         awayMenuItem = menu.addItem(withTitle: "Away Until I Return", action: #selector(chooseAway), keyEquivalent: "")
         automaticMenuItem = menu.addItem(withTitle: "Detect Automatically", action: #selector(chooseAutomatic), keyEquivalent: "")
@@ -306,37 +304,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func chooseAutomatic() { Presence.shared.choose(nil) }
     @objc private func openInputMonitoring() { Presence.shared.openInputMonitoringSettings() }
 
-    // The click that opens this menu is real input, so "now" always reads as
-    // here. How long that has held, and what came before it, say more.
     private func updatePresenceMenu() {
         let presence = Presence.shared
-        let held = Date().timeIntervalSince1970 - presence.since
-        presenceMenuItem.title = "\(Self.name(of: presence.reading.state)) for \(Self.duration(held)) (\(presence.reading.reason))"
-        if let previous = presence.previous {
-            previousPresenceMenuItem.title = "Before: \(Self.name(of: previous.state).lowercased()) for \(Self.duration(previous.duration)) (\(previous.reason))"
-            previousPresenceMenuItem.isHidden = false
-        } else {
-            previousPresenceMenuItem.isHidden = true
+        let name: String
+        switch presence.reading.state {
+        case .present: name = "At the Mac"
+        case .unsure: name = "Maybe at the Mac"
+        case .away: name = "Away"
         }
+        var detail = presence.reading.reason
+        if let last = presence.lastInput {
+            detail += ", last input \(Self.ago(Date().timeIntervalSince1970 - last))"
+        }
+        presenceMenuItem.title = "\(name): \(detail)"
         hereMenuItem.state = presence.override?.kind == .here ? .on : .off
         awayMenuItem.state = presence.override?.kind == .away ? .on : .off
         automaticMenuItem.state = presence.override == nil ? .on : .off
         inputMonitoringMenuItem.isHidden = presence.seesRealInput
     }
 
-    private static func name(of state: PresenceState) -> String {
-        switch state {
-        case .present: return "At the Mac"
-        case .unsure: return "Maybe at the Mac"
-        case .away: return "Away"
-        }
-    }
-
-    private static func duration(_ seconds: TimeInterval) -> String {
-        let seconds = max(Int(seconds), 0)
-        if seconds < 60 { return "\(seconds) s" }
-        if seconds < 3600 { return "\(seconds / 60) min" }
-        return "\(seconds / 3600) h \(seconds % 3600 / 60) min"
+    private static func ago(_ seconds: TimeInterval) -> String {
+        if seconds < 60 { return "\(max(Int(seconds), 0)) s ago" }
+        if seconds < 3600 { return "\(Int(seconds / 60)) min ago" }
+        return "\(Int(seconds / 3600)) h ago"
     }
 
     @objc private func toggleObjectiveFromMenu() {
@@ -381,6 +371,22 @@ extension AppDelegate: NSMenuDelegate {
         Presence.shared.refresh()
         updatePresenceMenu()
         updateStatusMenu()
+        // The reading stays live while the menu is open: keep the mouse still
+        // and the last input counts up. An open menu runs its own run loop
+        // mode, so the timer must run in the common modes.
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                Presence.shared.refresh()
+                AppDelegate.shared?.updatePresenceMenu()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        presenceMenuTimer = timer
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        presenceMenuTimer?.invalidate()
+        presenceMenuTimer = nil
     }
 }
 
