@@ -4,6 +4,10 @@ A queue for blocked agents. When many agents work at once, this is the one place
 shows which of them is stalled and waiting for you. Click an item and the terminal window
 of the agent that asked comes to the front.
 
+<p align="center">
+  <img src="docs/board.png" width="380" alt="The Objective overlay: an urgent question with two buttons, and a question with a reply field. Both say how long the agent has waited.">
+</p>
+
 It is deliberately not a chat client. Only two kinds of ask belong on the board:
 
 - a **permission** the agent lacks: publish, send, delete, spend;
@@ -143,6 +147,11 @@ Touch ID, a sudo prompt, or a system dialog times out when nobody sees it. So an
   back, a sound and a banner say so, the Telegram message closes, and the call returns `present`.
 - **Skip**, on the board or in Telegram, returns `skipped`, and the agent leaves the step undone.
 - Without the app, the item asks you with **Ready** and **Skip**.
+
+<p align="center">
+  <img src="docs/at-the-mac.png" width="360" alt="A step at the Mac while it runs: the item says do this now at the Mac.">
+  <img src="docs/at-the-mac-done.png" width="360" alt="The same step after it ended: checked off, with the answer At the Mac.">
+</p>
 
 `objective_presence` returns the current reading, so an agent can plan its work around it.
 
