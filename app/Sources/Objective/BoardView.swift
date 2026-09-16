@@ -285,14 +285,21 @@ private struct ItemRow: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
-    // Says why this item is at the top: an agent is stalled inside its tool
-    // call, or the session that asked has gone away.
+    // Says why this item is at the top: a step runs on the screen now, an
+    // agent is stalled inside its tool call, or the session that asked has
+    // gone away.
     @ViewBuilder
     private var statusLine: some View {
         if agentGone {
             Label("the agent is gone", systemImage: "moon.zzz")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.tertiary)
+        } else if item.needsMacNow {
+            // You are here and the agent went ahead, so this asks for nothing.
+            // It says what arrives on the screen in a moment.
+            Label("do this now at the Mac", systemImage: "desktopcomputer")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(accent)
         } else if item.isAtMac {
             TimelineView(.periodic(from: .now, by: 15)) { _ in
                 Label(

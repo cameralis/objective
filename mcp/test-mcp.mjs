@@ -20,6 +20,7 @@ const server = spawn(process.execPath, [path.join(here, "index.js")], {
     OBJECTIVE_STATE_DIR: stateDir,
     OBJECTIVE_APP: path.join(stateDir, "no-such-app"),
     OBJECTIVE_PRESENCE_CHECK_SECONDS: "1",
+    OBJECTIVE_AT_MAC_HOLD_SECONDS: "1",
   },
   stdio: ["pipe", "pipe", process.env.VERBOSE ? "inherit" : "ignore"],
 });
@@ -191,7 +192,8 @@ try {
   userAnswers(unknownItem.id, "Ready");
   assert.equal(payload(await unknownStep).result, "present");
 
-  // 8. A user at the Mac gets the step at once, and the board says so once.
+  // 8. A user at the Mac gets the step at once. The item stays on the board
+  //    long enough to read, asks nothing, and then closes itself.
   setPresence("present");
   const presence = payload(await call("objective_presence", {}));
   assert.equal(presence.state, "present");
@@ -201,8 +203,13 @@ try {
   );
   assert.equal(atOnce.result, "present");
   const readyItem = readBoard().items.find((x) => x.id === atOnce.id);
-  assert.equal(readyItem.status, "done");
+  assert.equal(readyItem.status, "open", "the step was done before the user could read it");
   assert.ok(readyItem.readyAt, "the board was not told that the user is at the Mac");
+  assert.equal(readyItem.choices, undefined, "an announcement must not ask anything");
+  const held = () => readBoard().items.find((x) => x.id === atOnce.id);
+  for (let i = 0; i < 200 && held().status === "open"; i++) await sleep(20);
+  assert.equal(held().status, "done", "the step stayed on the board after it ended");
+  assert.equal(held().answer, "At the Mac");
 
   // 9. An unsure user who comes back releases the step, with no click.
   setPresence("unsure");

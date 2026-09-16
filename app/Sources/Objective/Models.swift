@@ -31,7 +31,8 @@ struct ObjectiveItem: Codable, Identifiable, Equatable {
     // Waits for you to be at the Mac, not for an answer: Touch ID, a password,
     // a system dialog.
     var atMac: Bool?
-    // When you came back to the Mac for it, so the app says so once.
+    // When you were at the Mac for it, so the app says so once. It is set as
+    // the item arrives when you were there all along.
     var readyAt: Double?
 
     var isOpen: Bool { status == "open" }
@@ -39,6 +40,10 @@ struct ObjectiveItem: Codable, Identifiable, Equatable {
     var isAtMac: Bool { atMac ?? false }
     // An agent that sits inside the tool call is stalled until this is answered.
     var isBlocking: Bool { isOpen && (waiting ?? false) }
+    // You are at the Mac, so the agent went ahead and the step runs now. The
+    // item asks nothing: it says what is about to happen on the screen, and it
+    // closes itself when the step is over.
+    var needsMacNow: Bool { isOpen && isAtMac && readyAt != nil }
 
     var blockedFor: TimeInterval? {
         guard isBlocking, let since = waitingSince else { return nil }

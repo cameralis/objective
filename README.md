@@ -136,8 +136,9 @@ counts as you, and the menu shows **Allow Input Monitoring…**.
 Touch ID, a sudo prompt, or a system dialog times out when nobody sees it. So an agent calls
 `objective_add` with `at_mac: true` before it starts such a step:
 
-- You are at the Mac: the call returns `present` at once, a banner says what is coming, and
-  the agent starts the step.
+- You are at the Mac: the call returns `present` at once and the agent starts the step. A banner
+  says what is coming, and the item stays on the board while the step runs, so you can read it.
+  It asks nothing and closes itself after two minutes, or the moment you check it off.
 - You are away: the item goes on the board and to Telegram, and the call waits. When you come
   back, a sound and a banner say so, the Telegram message closes, and the call returns `present`.
 - **Skip**, on the board or in Telegram, returns `skipped`, and the agent leaves the step undone.

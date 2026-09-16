@@ -24,6 +24,11 @@ const AT_MAC = "At the Mac";
 const READY = "Ready";
 const SKIP = "Skip";
 const AT_MAC_NOTE = "🖥 Waits for you at the Mac. The agent goes on when you are back.";
+// A step at the Mac while the user is already there is an announcement, not a
+// question: the agent starts it at once. The item stays open this long, so the
+// user can read what is about to happen on their screen, and then closes
+// itself. Nobody is left to answer it.
+const AT_MAC_HOLD_SECONDS = Number(process.env.OBJECTIVE_AT_MAC_HOLD_SECONDS ?? 120);
 
 function readState() {
   try {
@@ -171,28 +176,28 @@ function dropAbandoned(id) {
 const pending = new Map();
 
 let cleanedUp = false;
-function dropAllPending() {
+function cleanUp() {
   if (cleanedUp) return 0;
   cleanedUp = true;
-  let dropped = 0;
+  let touched = 0;
   for (const [id, origin] of pending) {
-    if (dropAbandoned(id)) dropped += 1;
+    if (dropAbandoned(id)) touched += 1;
     clearWaiting(origin);
   }
   pending.clear();
-  return dropped;
+  return touched + releaseHolds();
 }
 
 for (const name of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(name, () => {
     // The board is written before we go. The short delay is only so the
     // Telegram message can be closed as well.
-    const dropped = dropAllPending();
-    if (dropped) setTimeout(() => process.exit(0), 300);
+    const touched = cleanUp();
+    if (touched) setTimeout(() => process.exit(0), 300);
     else process.exit(0);
   });
 }
-process.on("exit", dropAllPending);
+process.on("exit", cleanUp);
 
 // MARK: - Telegram, when the user is away
 
@@ -316,9 +321,37 @@ function markReady(id) {
       item.doneAt = now;
       closed = true;
     }
-    item.readyAt = now;
+    // The user may have been there from the start, and that is the moment
+    // the banner played.
+    if (item.readyAt == null) item.readyAt = now;
   });
   if (closed) closeOnRelay(id, AT_MAC);
+  return closed;
+}
+
+// Items that only announce a step running now, by id, with the timer that
+// closes each one.
+const holds = new Map();
+
+function holdAtMac(id) {
+  const timer = setTimeout(() => {
+    holds.delete(id);
+    markReady(id);
+  }, AT_MAC_HOLD_SECONDS * 1000);
+  // The board must never be the reason this process stays alive.
+  timer.unref?.();
+  holds.set(id, timer);
+}
+
+// The session ends, so the step it announced is over as well.
+function releaseHolds() {
+  let closed = 0;
+  for (const [id, timer] of holds) {
+    clearTimeout(timer);
+    if (markReady(id)) closed += 1;
+  }
+  holds.clear();
+  return closed;
 }
 
 // Waits for the user to be at the Mac, not for an answer. A Touch ID or
@@ -336,8 +369,6 @@ async function askAtMac({ text, detail, urgent, source, timeout_seconds }, extra
     detail,
     status: "open",
     createdAt: startedAt,
-    // Without the app nobody can tell, so the user says it with a button.
-    choices: presence ? [SKIP] : [READY, SKIP],
     allowReply: false,
     urgent: urgent ?? false,
     source: source ?? origin.project,
@@ -345,15 +376,13 @@ async function askAtMac({ text, detail, urgent, source, timeout_seconds }, extra
     atMac: true,
   };
 
+  // The user is here, so nothing is asked and nothing waits. The item still
+  // has to be read, because the prompt it warns about reaches the screen in a
+  // moment, so it stays on the board and closes itself later.
   if (presence?.state === "present") {
-    Object.assign(item, {
-      status: "done",
-      answer: AT_MAC,
-      answeredAt: startedAt,
-      doneAt: startedAt,
-      readyAt: startedAt,
-    });
+    item.readyAt = startedAt;
     mutate((s) => s.items.push(item));
+    holdAtMac(item.id);
     return textResult({
       ok: true,
       id: item.id,
@@ -363,6 +392,8 @@ async function askAtMac({ text, detail, urgent, source, timeout_seconds }, extra
     });
   }
 
+  // Without the app nobody can tell, so the user says it with a button.
+  item.choices = presence ? [SKIP] : [READY, SKIP];
   Object.assign(item, { waiting: true, waitingSince: startedAt });
   mutate((s) => s.items.push(item));
   const delivery = startDelivery(item);

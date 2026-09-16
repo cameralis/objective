@@ -39,7 +39,9 @@ final class Store: ObservableObject {
     private func rank(_ item: ObjectiveItem) -> Int {
         guard item.isOpen else { return -1 }
         if !SessionFocus.isAgentAlive(item.origin) { return 0 }
-        return (item.isUrgent ? 2 : 0) + (item.isBlocking ? 1 : 0)
+        // A step that runs on the screen right now is as urgent to read as a
+        // stalled agent, because it is already happening.
+        return (item.isUrgent ? 2 : 0) + ((item.isBlocking || item.needsMacNow) ? 1 : 0)
     }
 
     var openCount: Int { items.filter(\.isOpen).count }
@@ -145,7 +147,12 @@ final class Store: ObservableObject {
         items = pruned.items
 
         if firstLoadDone {
-            if !fresh.isEmpty { announce(fresh) }
+            // An item that needs you at the Mac the moment it arrives is both
+            // new and ready. Its own banner says more, so it is announced
+            // once, there.
+            let readyNow = Set(ready.map(\.id))
+            let queued = fresh.filter { !readyNow.contains($0.id) }
+            if !queued.isEmpty { announce(queued) }
             if !ready.isEmpty { announceReady(ready) }
         }
         firstLoadDone = true
@@ -167,6 +174,7 @@ final class Store: ObservableObject {
             return now.timeIntervalSince(heard) > 60
         }
         guard !unheard.isEmpty else { return }
+        highlight(unheard.filter(\.isOpen))
 
         NSSound(named: "Hero")?.play()
         AppDelegate.shared?.showPanel()
@@ -184,14 +192,21 @@ final class Store: ObservableObject {
         }
     }
 
-    private func announce(_ fresh: [ObjectiveItem]) {
-        for item in fresh {
+    // The row lights up for a moment, and the time is kept, so the same item
+    // is never announced twice.
+    private func highlight(_ items: [ObjectiveItem]) {
+        guard !items.isEmpty else { return }
+        for item in items {
             newIDs.insert(item.id)
             announcedAt[item.id] = Date()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            for item in fresh { self?.newIDs.remove(item.id) }
+            for item in items { self?.newIDs.remove(item.id) }
         }
+    }
+
+    private func announce(_ fresh: [ObjectiveItem]) {
+        highlight(fresh)
 
         let hasUrgent = fresh.contains(where: \.isUrgent)
         NSSound(named: hasUrgent ? "Sosumi" : "Glass")?.play()
