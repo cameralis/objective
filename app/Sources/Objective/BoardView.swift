@@ -132,22 +132,20 @@ struct BoardView: View {
     // Give the window first claim on a mouse drag. A press opens the card only
     // when the panel stayed put for the whole mouse sequence.
     private var badge: some View {
-        ZStack {
-            HStack(spacing: 6) {
-                Image(systemName: "scope")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text("ALL CLEAR")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .tracking(1.6)
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .contentShape(Capsule())
-
+        HStack(spacing: 6) {
+            Image(systemName: "scope")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("ALL CLEAR")
+                .font(.system(size: 9.5, weight: .bold))
+                .tracking(1.6)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 7)
+        .contentShape(Capsule())
+        .overlay {
             BadgeInteraction { peeking = true }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .glassCard(radius: 999)
     }
