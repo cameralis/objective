@@ -1,4 +1,72 @@
+import AppKit
 import SwiftUI
+
+struct BadgeInteractionState {
+    private var didDrag = false
+
+    mutating func mouseDown() {
+        didDrag = false
+    }
+
+    mutating func mouseDragged(deltaX: CGFloat, deltaY: CGFloat) -> Bool {
+        guard deltaX != 0 || deltaY != 0 else { return false }
+        didDrag = true
+        return true
+    }
+
+    mutating func mouseUpShouldOpen() -> Bool {
+        defer { didDrag = false }
+        return !didDrag
+    }
+}
+
+private final class BadgeInteractionView: NSView {
+    var onClick: () -> Void = {}
+    private var interactionState = BadgeInteractionState()
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        interactionState.mouseDown()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window else { return }
+        guard interactionState.mouseDragged(deltaX: event.deltaX, deltaY: event.deltaY) else { return }
+        let origin = window.frame.origin
+        window.setFrameOrigin(NSPoint(
+            x: origin.x + event.deltaX,
+            y: origin.y - event.deltaY
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if interactionState.mouseUpShouldOpen() { onClick() }
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { "ALL CLEAR" }
+    override func accessibilityHelp() -> String? { "Show the board" }
+    override func accessibilityPerformPress() -> Bool {
+        onClick()
+        return true
+    }
+}
+
+private struct BadgeInteraction: NSViewRepresentable {
+    let onClick: () -> Void
+
+    func makeNSView(context: Context) -> BadgeInteractionView {
+        let view = BadgeInteractionView()
+        view.onClick = onClick
+        return view
+    }
+
+    func updateNSView(_ nsView: BadgeInteractionView, context: Context) {
+        nsView.onClick = onClick
+    }
+}
 
 private struct ContentHeight: PreferenceKey {
     static let defaultValue: CGFloat = 0
@@ -61,10 +129,10 @@ struct BoardView: View {
         .glassCard(radius: 22)
     }
 
-    // One click opens the card again, for the times you want to move the panel
-    // or read what you answered a moment ago.
+    // Give the window first claim on a mouse drag. A press opens the card only
+    // when the panel stayed put for the whole mouse sequence.
     private var badge: some View {
-        Button { peeking = true } label: {
+        ZStack {
             HStack(spacing: 6) {
                 Image(systemName: "scope")
                     .font(.system(size: 11, weight: .semibold))
@@ -77,9 +145,10 @@ struct BoardView: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 7)
             .contentShape(Capsule())
+
+            BadgeInteraction { peeking = true }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .buttonStyle(.plain)
-        .help("Show the board")
         .glassCard(radius: 999)
     }
 
