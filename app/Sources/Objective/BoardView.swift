@@ -20,50 +20,61 @@ struct BadgeInteractionState {
     }
 }
 
-private final class BadgeInteractionView: NSView {
-    var onClick: () -> Void = {}
+// SwiftUI's hosting view can consume background drags. Use the same explicit
+// drag handling for the header and the badge, with a click action only for the badge.
+final class WindowInteractionView: NSView {
+    var onClick: (() -> Void)?
     private var interactionState = BadgeInteractionState()
+    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
         interactionState.mouseDown()
+        if let window {
+            dragStart = (window.convertPoint(toScreen: event.locationInWindow), window.frame.origin)
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let window else { return }
-        guard interactionState.mouseDragged(deltaX: event.deltaX, deltaY: event.deltaY) else { return }
-        let origin = window.frame.origin
+        guard let window, let dragStart else { return }
+        // Absolute event positions also work for synthetic drags whose deltas are zero.
+        let mouse = window.convertPoint(toScreen: event.locationInWindow)
+        let deltaX = mouse.x - dragStart.mouse.x
+        let deltaY = mouse.y - dragStart.mouse.y
+        _ = interactionState.mouseDragged(deltaX: deltaX, deltaY: deltaY)
         window.setFrameOrigin(NSPoint(
-            x: origin.x + event.deltaX,
-            y: origin.y - event.deltaY
+            x: dragStart.origin.x + deltaX,
+            y: dragStart.origin.y + deltaY
         ))
     }
 
     override func mouseUp(with event: NSEvent) {
-        if interactionState.mouseUpShouldOpen() { onClick() }
+        dragStart = nil
+        if interactionState.mouseUpShouldOpen() { onClick?() }
     }
 
-    override func isAccessibilityElement() -> Bool { true }
-    override func accessibilityRole() -> NSAccessibility.Role? { .button }
-    override func accessibilityLabel() -> String? { "ALL CLEAR" }
-    override func accessibilityHelp() -> String? { "Show the board" }
+    override func isAccessibilityElement() -> Bool { onClick != nil }
+    override func accessibilityRole() -> NSAccessibility.Role? { onClick == nil ? nil : .button }
+    override func accessibilityLabel() -> String? { onClick == nil ? nil : "ALL CLEAR" }
+    override func accessibilityHelp() -> String? { onClick == nil ? nil : "Show the board" }
     override func accessibilityPerformPress() -> Bool {
+        guard let onClick else { return false }
         onClick()
         return true
     }
 }
 
-private struct BadgeInteraction: NSViewRepresentable {
-    let onClick: () -> Void
+private struct WindowInteraction: NSViewRepresentable {
+    var onClick: (() -> Void)? = nil
 
-    func makeNSView(context: Context) -> BadgeInteractionView {
-        let view = BadgeInteractionView()
+    func makeNSView(context: Context) -> WindowInteractionView {
+        let view = WindowInteractionView()
         view.onClick = onClick
         return view
     }
 
-    func updateNSView(_ nsView: BadgeInteractionView, context: Context) {
+    func updateNSView(_ nsView: WindowInteractionView, context: Context) {
         nsView.onClick = onClick
     }
 }
@@ -145,7 +156,7 @@ struct BoardView: View {
         .padding(.vertical, 7)
         .contentShape(Capsule())
         .overlay {
-            BadgeInteraction { peeking = true }
+            WindowInteraction { peeking = true }
         }
         .glassCard(radius: 999)
     }
@@ -182,34 +193,7 @@ struct BoardView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "scope")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text("OBJECTIVE")
-                .font(.system(size: 11, weight: .bold))
-                .tracking(2.5)
-                .foregroundStyle(.secondary)
-            Spacer()
-            if store.openCount > 0 {
-                Text("\(store.openCount)")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(.quaternary, in: Capsule())
-                Button {
-                    store.clearAll()
-                } label: {
-                    Image(systemName: "checkmark.circle.badge.xmark")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Mark all done")
-            }
-        }
-        .padding(.bottom, 4)
+        BoardHeader(openCount: store.openCount, onClear: { store.clearAll() })
     }
 
     // The card is empty on purpose here, so the row is also the way back to
@@ -231,6 +215,48 @@ struct BoardView: View {
         }
         .buttonStyle(.plain)
         .help("Contract to a badge")
+    }
+}
+
+struct BoardHeader: View {
+    let openCount: Int
+    let onClear: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "scope")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("OBJECTIVE")
+                    .font(.system(size: 11, weight: .bold))
+                    .tracking(2.5)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if openCount > 0 {
+                    Text("\(openCount)")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                }
+            }
+            // The clear button stays outside the drag surface.
+            .overlay { WindowInteraction() }
+            if openCount > 0 {
+                Button {
+                    onClear()
+                } label: {
+                    Image(systemName: "checkmark.circle.badge.xmark")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Mark all done")
+            }
+        }
+        .padding(.bottom, 4)
     }
 }
 
